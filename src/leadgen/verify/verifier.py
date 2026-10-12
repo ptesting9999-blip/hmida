@@ -69,7 +69,9 @@ class EmailVerifier:
     def verify(self, email: str) -> VerificationResult:
         return self.verify_many([email])[email.strip().lower()]
 
-    def verify_many(self, emails: list[str], stop_at_first: bool = False) -> dict[str, VerificationResult]:
+    def verify_many(
+        self, emails: list[str], stop_at_first: bool = False, use_cache: bool = True
+    ) -> dict[str, VerificationResult]:
         """Verify addresses in the given (priority) order.
 
         With stop_at_first, checking stops at the first deliverable address so paid API credits
@@ -89,7 +91,7 @@ class EmailVerifier:
             if problem is not None:
                 results[email] = problem
                 continue
-            cached = self.store.cached_verification(email, self.cfg.cache_days) if self.store else None
+            cached = self.store.cached_verification(email, self.cfg.cache_days) if self.store and use_cache else None
             if cached is not None:
                 results[email] = cached
                 continue
@@ -168,8 +170,9 @@ class EmailVerifier:
         verdicts: dict[str, VerificationStatus] = {}
         reasons: list[str] = []
 
+        retryable = False
         if probe is not None:
-            smtp_status, smtp_reason = _smtp_verdict(email, probe)
+            smtp_status, smtp_reason, retryable = _smtp_verdict(email, probe)
             accepted_on_catch_all = probe.catch_all is True and smtp_status == "risky" and "catch-all" in smtp_reason
             if accepted_on_catch_all and self.provider is not None and self.cfg.trust_provider_on_catch_all:
                 # SMTP can't tell on a catch-all domain; let the verification API decide alone.
@@ -210,29 +213,33 @@ class EmailVerifier:
             ok = bool(confirmed)
         if ok:
             return _result(email, "deliverable", f"confirmed by {', '.join(confirmed)}", checks)
-        return _result(email, "unknown", "; ".join(reasons) or "could not confirm mailbox", checks)
+        result = _result(email, "unknown", "; ".join(reasons) or "could not confirm mailbox", checks)
+        result.retryable = retryable
+        return result
 
 
-def _smtp_verdict(email: str, probe: SmtpProbe) -> tuple[VerificationStatus, str]:
+def _smtp_verdict(email: str, probe: SmtpProbe) -> tuple[VerificationStatus, str, bool]:
+    """(status, reason, retryable) for one address from a domain's SMTP probe."""
     r = probe.results.get(email)
     if r is None:
-        return "unknown", "not probed"
+        return "unknown", "not probed", False
     msg = " ".join(r.message.split())[:160]
     if r.outcome == "accepted":
         if probe.catch_all is True:
-            return "risky", "catch-all domain: server accepts any address, mailbox cannot be confirmed"
+            return "risky", "catch-all domain: server accepts any address, mailbox cannot be confirmed", False
         if probe.catch_all is False:
-            return "deliverable", f"mailbox accepted ({r.code}), random address rejected"
-        return "unknown", f"mailbox accepted ({r.code}) but catch-all test was inconclusive"
+            return "deliverable", f"mailbox accepted ({r.code}), random address rejected", False
+        greylisted = probe.catch_all_outcome == "temp"
+        return "unknown", f"mailbox accepted ({r.code}) but catch-all test was inconclusive", greylisted
     if r.outcome == "rejected":
-        return "undeliverable", f"mailbox rejected: {r.code} {msg}"
+        return "undeliverable", f"mailbox rejected: {r.code} {msg}", False
     if r.outcome == "full":
-        return "risky", f"mailbox full / over quota (likely abandoned): {r.code} {msg}"
+        return "risky", f"mailbox full / over quota (likely abandoned): {r.code} {msg}", False
     if r.outcome == "temp":
-        return "unknown", f"temporary failure / greylisting: {r.code} {msg}"
+        return "unknown", f"temporary failure / greylisting: {r.code} {msg}", True
     if r.outcome == "blocked":
-        return "unknown", f"probe blocked by server policy: {r.code} {msg}"
-    return "unknown", f"SMTP error: {msg}"
+        return "unknown", f"probe blocked by server policy: {r.code} {msg}", False
+    return "unknown", f"SMTP error: {msg}", False
 
 
 def _result(email: str, status: VerificationStatus, reason: str, checks: dict[str, str]) -> VerificationResult:

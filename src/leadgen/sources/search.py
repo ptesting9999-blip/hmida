@@ -36,6 +36,8 @@ class SearchHit:
 
 class SearchBackend(Protocol):
     name: str
+    # How many intent phrases to OR into one query (see leadgen.queries).
+    phrases_per_query: int
 
     def search(self, query: str, window: Optional[Window], limit: int) -> list[SearchHit]: ...
 
@@ -50,6 +52,7 @@ class BraveSearch:
     """Brave Search API. Supports an exact date range through ``freshness=YYYY-MM-DDtoYYYY-MM-DD``."""
 
     name = "brave"
+    phrases_per_query = 3
     URL = "https://api.search.brave.com/res/v1/web/search"
     PAGE_SIZE = 20
 
@@ -90,6 +93,7 @@ class SerperSearch:
     """Serper.dev (Google results). Date range via Google's ``tbs=cdr:1,cd_min:..,cd_max:..``."""
 
     name = "serper"
+    phrases_per_query = 3
     URL = "https://google.serper.dev/search"
     PAGE_SIZE = 10
 
@@ -140,8 +144,11 @@ class ClaudeWebSearch:
     """
 
     name = "claude"
+    # Claude plans its own searches, so hand it every phrase for a platform in one research
+    # call instead of one call per 3 phrases: about 6x fewer calls per run.
+    phrases_per_query = 100
 
-    def __init__(self, llm: LLM, max_searches: int = 3) -> None:
+    def __init__(self, llm: LLM, max_searches: int = 5) -> None:
         self.llm = llm
         self.max_searches = max_searches
 
@@ -150,7 +157,7 @@ class ClaudeWebSearch:
             user = f"Search the web for: {query}\nThen list the most relevant result URLs."
         else:
             user = (
-                f"Run this web search: {query}\n\n"
+                f"Search the web for this (split it into several shorter searches as you see fit): {query}\n\n"
                 f"Find individual public posts published between {window.describe()} in which the author "
                 "is asking to hire, or asking for recommendations for, help with social media or paid ads. "
                 "For each relevant post report its exact URL, the author's name, and a verbatim quote of the "
@@ -204,7 +211,8 @@ class SearchSource:
 
     def queries(self, niches: list[NicheTarget]) -> list[tuple[str, Optional[str]]]:
         """(query, niche name or None for explicit-intent queries)."""
-        out: list[tuple[str, Optional[str]]] = [(q, None) for q, _ in intent_queries(self.cfg.platforms)]
+        per_query = getattr(self.backend, "phrases_per_query", 3)
+        out: list[tuple[str, Optional[str]]] = [(q, None) for q, _ in intent_queries(self.cfg.platforms, per_query=per_query)]
         out += [(q, None) for q in self.cfg.extra_queries]
         for niche in niches:
             out += [(q, niche.name) for q in niche.search_queries]

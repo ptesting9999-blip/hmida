@@ -85,6 +85,8 @@ class VerificationResult:
     reason: str
     checks: dict[str, str] = field(default_factory=dict)
     checked_at: Optional[datetime] = None
+    # True when the answer was "try again later" (greylisting); worth re-checking in a few minutes.
+    retryable: bool = False
 
     @property
     def deliverable(self) -> bool:

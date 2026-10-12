@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS leads (
     domain TEXT NOT NULL,
     intent_url TEXT NOT NULL,
     row TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    verified_at TEXT
 );
 CREATE INDEX IF NOT EXISTS leads_domain ON leads(domain);
 CREATE TABLE IF NOT EXISTS niches (
@@ -48,7 +50,18 @@ class Store:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._lock = threading.Lock()
+
+    def _migrate(self) -> None:
+        """Bring databases created by older versions up to the current schema."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(leads)")}
+        if "status" not in cols:
+            self._conn.execute("ALTER TABLE leads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        if "verified_at" not in cols:
+            self._conn.execute("ALTER TABLE leads ADD COLUMN verified_at TEXT")
+            self._conn.execute("UPDATE leads SET verified_at = created_at")
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -109,13 +122,43 @@ class Store:
         return bool(self._exec("SELECT 1 FROM leads WHERE domain = ? AND created_at >= ?", (domain.lower(), since)))
 
     def save_lead(self, lead: Lead, domain: str) -> None:
+        now = utcnow().isoformat()
         self._exec(
-            "INSERT OR IGNORE INTO leads(email, domain, intent_url, row, created_at) VALUES (?, ?, ?, ?, ?)",
-            (lead.email.lower(), domain.lower(), lead.intent_url, json.dumps(lead.as_row()), utcnow().isoformat()),
+            "INSERT OR IGNORE INTO leads(email, domain, intent_url, row, created_at, status, verified_at) "
+            "VALUES (?, ?, ?, ?, ?, 'active', ?)",
+            (lead.email.lower(), domain.lower(), lead.intent_url, json.dumps(lead.as_row()), now, now),
         )
 
-    def all_leads(self) -> list[dict[str, Any]]:
-        return [json.loads(r[0]) for r in self._exec("SELECT row FROM leads ORDER BY created_at")]
+    def all_leads(self, include_inactive: bool = False) -> list[dict[str, Any]]:
+        """Delivered leads, oldest first. By default only those whose email is still verified."""
+        where = "" if include_inactive else "WHERE status = 'active'"
+        rows = self._exec(f"SELECT row, status, verified_at FROM leads {where} ORDER BY created_at")
+        return [{**json.loads(r[0]), "status": r[1], "last_verified_at": r[2] or ""} for r in rows]
+
+    def leads_due_for_reverification(self, older_than_days: int) -> list[str]:
+        """Emails of active leads last verified before the cutoff, plus every unconfirmed one."""
+        cutoff = (utcnow() - timedelta(days=older_than_days)).isoformat()
+        rows = self._exec(
+            "SELECT email FROM leads WHERE status = 'unconfirmed' "
+            "OR (status = 'active' AND (verified_at IS NULL OR verified_at <= ?)) ORDER BY created_at",
+            (cutoff,),
+        )
+        return [r[0] for r in rows]
+
+    def set_lead_status(self, email: str, status: str, verification: str, verified: bool) -> None:
+        """status: active | unconfirmed | invalid. verified=True stamps verified_at with now."""
+        rows = self._exec("SELECT row FROM leads WHERE email = ?", (email.lower(),))
+        if not rows:
+            return
+        row = json.loads(rows[0][0])
+        row["verification"] = verification
+        if verified:
+            self._exec(
+                "UPDATE leads SET status = ?, row = ?, verified_at = ? WHERE email = ?",
+                (status, json.dumps(row), utcnow().isoformat(), email.lower()),
+            )
+        else:
+            self._exec("UPDATE leads SET status = ?, row = ? WHERE email = ?", (status, json.dumps(row), email.lower()))
 
     # -- niches ------------------------------------------------------------------------
 

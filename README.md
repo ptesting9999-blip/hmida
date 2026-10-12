@@ -23,8 +23,8 @@ checks that person's email address strictly, and saves a CSV of warm leads.
 | **Strict 2–14 day window** | Each post's date comes from the most reliable source available: the timestamp encoded in LinkedIn and X post IDs (exact to the millisecond), Reddit's API, feed dates, or the search engine's index date. Searches are restricted to the window on the API side too. **Posts without a trustworthy date are dropped.** | `dates.py`, `config.window` |
 | **Smart audience targeting** | Once a week Claude runs web research (server-side web search tool) to find niches with live demand signals: openings, launches, funding, seasonal peaks. For each niche it writes search queries and subreddits. Posts found this way are judged as *growth signals*, kept separate from explicit requests, and have their own score threshold. | `niches.py` |
 | **Decision-maker extraction** | Finds the business's own domain (from the post, or by search), then crawls the homepage plus the about, team and contact pages. It reads JSON-LD `founder` / `Person` data and has Claude extract named owners, founders, CEOs and marketing leads; a name is kept only if it appears verbatim on the page. Hunter.io and the company's email pattern are used when available. Titles are ranked (owner/founder > CEO > CMO/head of marketing > …), and assistants or support staff are excluded. **Role addresses (info@, support@, hello@, sales@ …) are never used.** | `enrich/` |
-| **Strict email validation** | An address passes only when it is **positively confirmed** deliverable. Checks: syntax → suppression list → role account → disposable domain → MX records (null MX and dead domains rejected) → SMTP `RCPT TO` on the mailbox plus a random-address probe that detects **catch-all** domains → optional verification API (ZeroBounce / NeverBounce / MillionVerifier) → mailbox **activity** data, which rejects dormant inboxes. Catch-all, unknown, greylisted, full or inactive mailboxes are rejected. | `verify/` |
-| **Structured output** | `output/leads_<timestamp>.csv` / `.json` plus a cumulative `leads_all.csv` (columns below). `rejected_<timestamp>.csv` gives the reason every post was dropped. | `output.py` |
+| **Strict email validation** | An address passes only when it is **positively confirmed** deliverable. Checks: syntax → suppression list → role account → disposable domain → MX records (null MX and dead domains rejected) → SMTP `RCPT TO` on the mailbox plus a random-address probe that detects **catch-all** domains → optional verification API (ZeroBounce / NeverBounce / MillionVerifier) → mailbox **activity** data, which rejects dormant inboxes. Catch-all, unknown, full or inactive mailboxes are rejected. Mail servers that greylist ("try again later") are re-checked a few minutes later in the same run. `leadgen reverify` re-checks stored leads before a campaign and drops any that no longer pass. | `verify/`, `maintenance.py` |
+| **Structured output** | `output/leads_<timestamp>.csv` / `.json` plus a cumulative `leads_all.csv` (columns below), optionally pushed to Slack, Zapier, Make, n8n or a CRM webhook. `rejected_<timestamp>.csv` gives the reason every post was dropped. | `output.py` |
 
 ### Output columns
 
@@ -57,6 +57,16 @@ cp .env.example .env                 # add API keys
 | `REDDIT_CLIENT_ID` / `_SECRET` | recommended | Reddit API at full rate limits (a free "script" app). Without it, slow anonymous access is used. |
 | `ZEROBOUNCE_API_KEY` (or NeverBounce / MillionVerifier) | recommended, **required if you can't use port 25** | Second verification opinion. ZeroBounce also returns mailbox activity, used to reject dormant inboxes. |
 | `HUNTER_API_KEY` | optional | Known decision-maker emails and the company's email pattern |
+| `LEADGEN_WEBHOOK_URL` | optional | Push each run's new leads to Zapier / Make / n8n / a CRM (`output.webhook_format: json`) or a Slack incoming webhook (`slack`) |
+
+Then check everything before the first real run:
+
+```bash
+leadgen doctor
+```
+
+It tests each key, checks that DNS works, and checks whether this machine can reach a mail server on
+port 25. It also flags placeholder SMTP settings, and tells you how to fix anything that fails.
 
 ### SMTP verification needs port 25
 
@@ -74,6 +84,7 @@ The best accuracy comes from both, with `confirmations_required: all`.
 ## Usage
 
 ```bash
+leadgen doctor                  # check keys, DNS and port 25
 leadgen run --limit 20          # first test: assess at most 20 new posts
 leadgen run                     # full run with the window from config (default: last 14 days)
 leadgen run --days 7            # only posts from the last 7 days
@@ -82,8 +93,9 @@ leadgen run --every 6           # keep running autonomously, every 6 hours
 
 leadgen niches --refresh        # re-run the niche research now and print it
 leadgen verify jane@acme.com    # run the full verification on any address
+leadgen reverify                # re-check leads verified >7 days ago; drops dead ones from exports
 leadgen suppress jane@acme.com acme.com   # never contact these (opt-outs, clients, competitors)
-leadgen export                  # every lead delivered so far, as one CSV
+leadgen export                  # every lead whose email still verifies, as one CSV (--all: include dropped)
 ```
 
 Each run skips posts it has already processed. It never delivers the same email twice, or the same
@@ -93,7 +105,23 @@ To schedule with cron instead of `--every`:
 
 ```cron
 15 */6 * * *  cd /path/to/hmida && .venv/bin/leadgen run >> output/cron.log 2>&1
+40 7 * * 1    cd /path/to/hmida && .venv/bin/leadgen reverify >> output/cron.log 2>&1
 ```
+
+### Deploy with Docker
+
+On a server that allows outbound port 25 (or with a verification API key), with `config.yaml` and
+`.env` in the project folder:
+
+```bash
+mkdir -p data output                       # owned by your user, so the container can write to them
+docker compose run --rm leadgen doctor     # check the setup
+docker compose up -d                       # runs every 6 hours, restarts on reboot
+docker compose run --rm leadgen reverify   # before a campaign
+docker compose logs -f                     # watch it work
+```
+
+Leads land in `./output`; the database and suppression list live in `./data`.
 
 You can also feed in posts from other tools you're licensed to use (a Sales Navigator export, a
 saved-search tool, a VA's spreadsheet). List CSV / JSONL files under `sources.imports`, with the
@@ -108,9 +136,8 @@ check *positively confirms* it, and rejects anything uncertain (catch-all, unkno
 blocked, full, inactive). The cost is that some real leads are discarded, notably every business
 whose domain is catch-all, and Yahoo/AOL addresses, which accept all recipients. If you use a
 verification API, `verification.trust_provider_on_catch_all: true` lets the API alone confirm such
-an address (its own "catch-all" answers are still rejected). Re-verify before
-a campaign if a lead is more than a few weeks old (`leadgen verify`); results are cached for
-`verification.cache_days`.
+an address (its own "catch-all" answers are still rejected). Mailboxes die over time, so run
+`leadgen reverify` right before each campaign; it bypasses the verification cache.
 
 **LinkedIn and Instagram are reached through search engines, not by logging in.** Automated,
 logged-in scraping breaks both platforms' terms of service, and they enforce it with account bans
@@ -128,9 +155,9 @@ keep `data/` and `output/` private, because they contain personal data. This is 
 **Costs scale with volume.** Every post that passes the prefilter costs one Claude call (low
 effort), and every qualified business costs one more for people extraction. That call sees only the
 text around titles like "founder" or "owner", not whole pages. Searching through Claude's web search
-tool, the fallback when no Brave or Serper key is set, makes about one research call per query per
-run, so a search API key is much cheaper at scale. To change the model, set `llm.model` (for
-example `claude-sonnet-5-5`).
+tool, the fallback when no Brave or Serper key is set, makes one research call per platform and per
+niche query on every run. A search API key is much cheaper at scale. To change the model, set
+`llm.model` (for example `claude-sonnet-5-5`).
 
 ## Development
 
@@ -140,9 +167,10 @@ ruff check src tests
 ```
 
 The tests cover date decoding, every verification path (including a real SMTP conversation with a
-local test server), the enrichment heuristics, source parsing, the request shapes the Claude SDK
-sends, and an end-to-end run with fake sources.
+local test server), greylisting retries, re-verification, the enrichment heuristics, source parsing,
+webhook payloads, `doctor`, the request shapes the Claude SDK sends, and an end-to-end run with fake
+sources.
 
 Live integrations were written against the published API shapes of Brave Search, Serper,
 Reddit, Hunter, ZeroBounce, NeverBounce and MillionVerifier, but have not been exercised against
-those services. Run `leadgen run --limit 5 -v` first after adding a key.
+those services. Run `leadgen doctor`, then `leadgen run --limit 5 -v`, after adding keys.

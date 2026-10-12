@@ -198,3 +198,126 @@ def test_free_mail_owners_are_not_deduplicated_by_provider(tmp_path):
     )
     report = agent.run(now=NOW)
     assert sorted(lead.email for lead in report.leads) == ["dana.reyes@gmail.com", "lee.park@gmail.com"]
+
+
+class GreylistOnceProber:
+    """First contact: 451 greylisted. Any later attempt: normal answers."""
+
+    def __init__(self, mailboxes):
+        self.mailboxes = set(mailboxes)
+        self.attempts = 0
+
+    def probe(self, domain, hosts, emails):
+        self.attempts += 1
+        if self.attempts == 1:
+            return SmtpProbe(host=hosts[0], catch_all=None, catch_all_outcome="temp",
+                             results={e: RcptResult("temp", 451, "4.7.1 greylisted, try later") for e in emails})
+        results = {e: RcptResult("accepted", 250, "ok") if e in self.mailboxes else RcptResult("rejected", 550, "5.1.1 no") for e in emails}
+        return SmtpProbe(host=hosts[0], catch_all=False, results=results)
+
+
+def test_greylisted_business_is_retried_later(tmp_path):
+    post = li_post("https://www.linkedin.com/posts/sarah-lee_grey-activity-21", 2)
+    agent, _ = make_agent(tmp_path, [post], {post.url: assessment()})
+    prober = GreylistOnceProber({"sarah@acmefit.com"})
+    agent.verifier.prober = prober
+    waits = []
+    agent._sleep = waits.append
+    report = agent.run(now=NOW)
+    assert [lead.email for lead in report.leads] == ["sarah@acmefit.com"]
+    assert prober.attempts == 2
+    assert len(waits) == 1 and 0 < waits[0] <= agent.cfg.verification.greylist_retry_seconds
+
+
+def test_greylist_retry_disabled_rejects(tmp_path):
+    post = li_post("https://www.linkedin.com/posts/sarah-lee_grey-activity-22", 2)
+    agent, _ = make_agent(tmp_path, [post], {post.url: assessment()})
+    agent.cfg.verification.greylist_retry_seconds = 0
+    agent.verifier.prober = GreylistOnceProber({"sarah@acmefit.com"})
+    report = agent.run(now=NOW)
+    assert report.leads == []
+    assert report.rejections[-1].stage == "verify"
+
+
+def test_reverify_marks_dead_and_unconfirmed_leads(tmp_path):
+    from leadgen.maintenance import reverify_leads
+
+    post = li_post("https://www.linkedin.com/posts/sarah-lee_rv-activity-31", 2)
+    agent, _ = make_agent(tmp_path, [post], {post.url: assessment()})
+    agent.run(now=NOW)
+    store = agent.store
+    assert [r["verified_email"] for r in store.all_leads()] == ["sarah@acmefit.com"]
+
+    # The mailbox has since been deleted: the lead must drop out of exports.
+    agent.verifier.prober = FakeProber(mailboxes=())
+    report = reverify_leads(store, agent.verifier, older_than_days=0)
+    assert report.invalid == ["sarah@acmefit.com"]
+    assert store.all_leads() == []
+    assert store.all_leads(include_inactive=True)[0]["status"] == "invalid"
+    assert store.leads_due_for_reverification(0) == []  # invalid leads are not re-checked
+
+
+def test_reverify_greylisted_then_confirmed(tmp_path):
+    from leadgen.maintenance import reverify_leads
+
+    post = li_post("https://www.linkedin.com/posts/sarah-lee_rv-activity-32", 2)
+    agent, _ = make_agent(tmp_path, [post], {post.url: assessment()})
+    agent.run(now=NOW)
+    agent.verifier.prober = GreylistOnceProber({"sarah@acmefit.com"})
+    waits = []
+    report = reverify_leads(agent.store, agent.verifier, 0, greylist_retry_seconds=300, sleep=waits.append)
+    assert report.still_valid == ["sarah@acmefit.com"] and waits == [300]
+
+
+def test_store_migrates_old_lead_table(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE leads (email TEXT PRIMARY KEY, domain TEXT NOT NULL, intent_url TEXT NOT NULL, row TEXT NOT NULL, created_at TEXT NOT NULL)")
+    con.execute("INSERT INTO leads VALUES ('a@b.com', 'b.com', 'u', '{}', '2026-10-01T00:00:00+00:00')")
+    con.commit()
+    con.close()
+    store = Store(db)
+    assert store.all_leads()[0]["status"] == "active"
+    assert store.leads_due_for_reverification(1) == ["a@b.com"]
+
+
+class RecordingSession:
+    def __init__(self):
+        self.posts = []
+
+    def post(self, url, json=None, timeout=None):
+        self.posts.append((url, json))
+        return type("R", (), {"raise_for_status": lambda self: None})()
+
+
+def test_webhook_payloads():
+    from leadgen.output import post_webhook
+
+    lead = {
+        "verified_email": "sarah@acmefit.com", "contact_name": "Sarah Lee", "contact_role": "Founder",
+        "business_name": "Acme Fitness", "business_website": "https://acmefit.com", "platform": "LinkedIn",
+        "posted_date": "2026-10-09", "intent_url": "https://www.linkedin.com/posts/x", "summary": "Needs Meta ads.",
+    }
+    session = RecordingSession()
+    assert post_webhook("https://hooks.example/json", "json", [lead], session)
+    assert session.posts[0][1] == {"source": "leadgen", "count": 1, "leads": [lead]}
+
+    session = RecordingSession()
+    post_webhook("https://hooks.slack.test/x", "slack", [lead] * 30, session)
+    assert len(session.posts) == 2  # chunked
+    text = session.posts[0][1]["text"]
+    assert text.startswith("*30 new verified leads*") and "<mailto:sarah@acmefit.com|sarah@acmefit.com>" in text
+
+
+def test_webhook_failure_is_not_fatal():
+    import requests
+
+    from leadgen.output import post_webhook
+
+    class Broken:
+        def post(self, *a, **k):
+            raise requests.ConnectionError("down")
+
+    assert post_webhook("https://hooks.example/json", "json", [{"a": 1}], Broken()) is False

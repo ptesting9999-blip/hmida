@@ -38,16 +38,18 @@ PLATFORM_FILTERS: dict[str, str] = {
 PHRASES_PER_QUERY = 3
 
 
-def intent_queries(platforms: list[str], phrases: list[str] | None = None) -> list[tuple[str, str]]:
-    """Return (query, platform) pairs, OR-ing a few quoted phrases per query to stay short."""
+def intent_queries(
+    platforms: list[str], phrases: list[str] | None = None, per_query: int = PHRASES_PER_QUERY
+) -> list[tuple[str, str]]:
+    """Return (query, platform) pairs, OR-ing ``per_query`` quoted phrases per query."""
     phrases = phrases or INTENT_PHRASES
     out: list[tuple[str, str]] = []
     for platform in platforms:
         if platform not in PLATFORM_FILTERS:
             raise ValueError(f"unknown platform {platform!r}; choose from {sorted(PLATFORM_FILTERS)}")
         site = PLATFORM_FILTERS[platform]
-        for i in range(0, len(phrases), PHRASES_PER_QUERY):
-            chunk = phrases[i : i + PHRASES_PER_QUERY]
+        for i in range(0, len(phrases), per_query):
+            chunk = phrases[i : i + per_query]
             ored = " OR ".join(f'"{p}"' for p in chunk)
             out.append(((f"{site} ({ored})" if site else f"({ored})").strip(), platform))
     return out

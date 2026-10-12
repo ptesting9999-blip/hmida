@@ -185,3 +185,19 @@ def test_unreachable_port():
     prober = SmtpProber("h", "f@agency.test", timeout=2, port=port)
     probe = prober.probe("acme.test", ["127.0.0.1"], ["owner@acme.test"])
     assert probe.results["owner@acme.test"].outcome == "error"
+
+
+def test_catch_all_probe_address_is_stable_per_domain():
+    prober = _prober(FakeSMTP(set()))
+    a = prober.nonexistent_address("acme.com")
+    assert a == prober.nonexistent_address("acme.com")  # same triplet on retry gets past greylisting
+    assert a != prober.nonexistent_address("other.com")
+    assert a.endswith("@acme.com") and len(a.split("@")[0]) == 20
+
+
+def test_greylisted_catch_all_probe_is_reported():
+    fake = FakeSMTP({"jane@acme.com"})
+    original = fake.rcpt
+    fake.rcpt = lambda addr: original(addr) if addr == "jane@acme.com" else (450, b"4.2.0 greylisted")
+    probe = _prober(fake).probe("acme.com", ["mx"], ["jane@acme.com"])
+    assert probe.catch_all is None and probe.catch_all_outcome == "temp"

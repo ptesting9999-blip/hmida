@@ -1,4 +1,4 @@
-"""Command line: leadgen run | niches | verify | suppress | export"""
+"""Command line: leadgen run | niches | verify | reverify | suppress | export | doctor"""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ from typing import Optional
 from leadgen.compliance import Suppression
 from leadgen.config import Config, Secrets, load_config, load_dotenv
 from leadgen.dates import utcnow
+from leadgen.doctor import Doctor, format_checks
 from leadgen.factory import SetupError, build_agent, make_http, make_llm, make_verifier
 from leadgen.llm import LLMUnavailable
 from leadgen.niches import NicheResearcher
-from leadgen.output import LEAD_COLUMNS, write_csv
+from leadgen.maintenance import reverify_leads
+from leadgen.output import EXPORT_COLUMNS, write_csv
 from leadgen.store import Store
 
 log = logging.getLogger("leadgen")
@@ -36,10 +38,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg = Config.model_validate(cfg.model_dump())  # re-validate overrides
     agent = build_agent(cfg, Secrets.from_env())
     while True:
-        report = agent.run(limit=args.limit)
-        print(report.summary())
         if not args.every:
+            print(agent.run(limit=args.limit).summary())
             return 0
+        try:
+            print(agent.run(limit=args.limit).summary(), flush=True)
+        except LLMUnavailable:
+            raise  # bad key: retrying every few hours won't fix it
+        except Exception:
+            # Network blips etc. must not stop an unattended agent; try again next cycle.
+            log.exception("run failed; retrying at the next scheduled run")
         log.info("next run in %.1f hours (Ctrl+C to stop)", args.every)
         time.sleep(args.every * 3600)
 
@@ -85,12 +93,33 @@ def cmd_suppress(args: argparse.Namespace) -> int:
 
 def cmd_export(args: argparse.Namespace) -> int:
     cfg = _config(args.config)
-    rows = Store(cfg.db_path).all_leads()
+    rows = Store(cfg.db_path).all_leads(include_inactive=args.all)
     out = Path(args.out or f"{cfg.output.dir}/all_leads_{utcnow():%Y%m%d}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
-    write_csv(out, rows, LEAD_COLUMNS)
+    write_csv(out, rows, EXPORT_COLUMNS)
     print(f"exported {len(rows)} leads to {out}")
     return 0
+
+
+def cmd_reverify(args: argparse.Namespace) -> int:
+    cfg = _config(args.config)
+    store = Store(cfg.db_path)
+    _, api_http = make_http(cfg)
+    verifier = make_verifier(cfg, Secrets.from_env(), store, api_http)
+    report = reverify_leads(store, verifier, args.older_than, cfg.verification.greylist_retry_seconds)
+    print(report.summary())
+    rows = store.all_leads()
+    out = Path(f"{cfg.output.dir}/verified_leads_{utcnow():%Y%m%d-%H%M%S}.csv")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(out, rows, EXPORT_COLUMNS)
+    print(f"wrote {len(rows)} currently verified leads to {out}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    checks = Doctor(_config(args.config), Secrets.from_env()).run()
+    print(format_checks(checks))
+    return 1 if any(c.status == "fail" for c in checks) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = argparse.ArgumentParser(prog="leadgen", description="Intent-based lead generation agent for SMMA / ads agencies")
     sub = p.add_subparsers(dest="command", required=True)
+
+    doctor = sub.add_parser("doctor", parents=[common], help="check keys, DNS and port 25 before the first run")
+    doctor.set_defaults(func=cmd_doctor)
 
     run = sub.add_parser("run", parents=[common], help="find, qualify, enrich and verify new leads")
     run.add_argument("--days", type=int, help="max post age in days (overrides window.max_age_days)")
@@ -122,7 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = sub.add_parser("export", parents=[common], help="export every lead delivered so far to CSV")
     export.add_argument("--out", help="output CSV path")
+    export.add_argument("--all", action="store_true", help="include leads whose email no longer verifies")
     export.set_defaults(func=cmd_export)
+
+    reverify = sub.add_parser("reverify", parents=[common], help="re-check stored leads' emails before a campaign")
+    reverify.add_argument("--older-than", type=int, default=7, metavar="DAYS", help="re-check leads last verified more than DAYS ago (default 7)")
+    reverify.set_defaults(func=cmd_reverify)
     return p
 
 

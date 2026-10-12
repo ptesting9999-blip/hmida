@@ -149,6 +149,9 @@ class VerificationConfig(_Section):
     # Reject mailboxes with no activity for longer than this (ZeroBounce activity data).
     max_inactive_days: Optional[int] = 365
     cache_days: int = Field(default=30, ge=0)
+    # Greylisting servers answer "try again later" to first contact. Businesses whose best
+    # address got that answer are re-checked once, this many seconds later (0 = never).
+    greylist_retry_seconds: int = Field(default=360, ge=0, le=3600)
     extra_disposable_domains_file: Optional[str] = None
 
 
@@ -166,6 +169,9 @@ class OutputConfig(_Section):
     dir: str = "output"
     formats: list[Literal["csv", "json"]] = Field(default_factory=lambda: ["csv", "json"])
     write_rejected: bool = True
+    # New leads are also POSTed to LEADGEN_WEBHOOK_URL (env) when it is set:
+    # json = {"leads": [...]} for Zapier / Make / n8n / your CRM, slack = a Slack incoming webhook.
+    webhook_format: Literal["json", "slack"] = "json"
 
 
 class HttpConfig(_Section):
@@ -187,7 +193,7 @@ class Config(_Section):
     output: OutputConfig = Field(default_factory=OutputConfig)
     http: HttpConfig = Field(default_factory=HttpConfig)
     db_path: str = "data/leadgen.db"
-    suppression_file: str = "suppression.txt"
+    suppression_file: str = "data/suppression.txt"
     workers: int = Field(default=4, ge=1, le=32)
 
 
@@ -201,6 +207,7 @@ class Secrets(BaseModel):
     zerobounce_api_key: Optional[str] = None
     neverbounce_api_key: Optional[str] = None
     millionverifier_api_key: Optional[str] = None
+    leadgen_webhook_url: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "Secrets":

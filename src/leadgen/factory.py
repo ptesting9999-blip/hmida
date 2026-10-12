@@ -14,7 +14,7 @@ from leadgen.enrich.hunter import Hunter
 from leadgen.enrich.website import WebsiteCrawler
 from leadgen.http import HttpClient
 from leadgen.intent import IntentClassifier
-from leadgen.llm import LLM
+from leadgen.llm import LLM, LLMUnavailable
 from leadgen.niches import NicheResearcher
 from leadgen.output import OutputWriter
 from leadgen.pipeline import LeadAgent
@@ -51,8 +51,8 @@ def make_http(cfg: Config) -> tuple[HttpClient, HttpClient]:
 def make_llm(cfg: Config, secrets: Secrets) -> LLM:
     try:
         return LLM(cfg.llm, api_key=secrets.anthropic_api_key)
-    except anthropic.AnthropicError as exc:
-        raise SetupError(f"Claude is required: set ANTHROPIC_API_KEY ({exc})") from exc
+    except (anthropic.AnthropicError, LLMUnavailable) as exc:
+        raise SetupError(f"Claude is required: {exc}") from exc
 
 
 def make_search_backend(cfg: Config, secrets: Secrets, api_http: HttpClient, llm: LLM) -> SearchBackend:
@@ -150,6 +150,6 @@ def build_agent(cfg: Config, secrets: Secrets) -> LeadAgent:
         finder=finder,
         verifier=verifier,
         store=store,
-        writer=OutputWriter(cfg.output),
+        writer=OutputWriter(cfg.output, webhook_url=secrets.leadgen_webhook_url),
         niche_researcher=NicheResearcher(cfg, llm, store),
     )

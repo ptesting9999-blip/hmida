@@ -14,6 +14,10 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Business pages are small; anything bigger is a file or a trap. Read at most this much.
+MAX_PAGE_BYTES = 2_000_000
+_TEXTUAL = ("html", "xml", "text", "rss", "atom")
+
 
 @dataclass
 class Page:
@@ -81,14 +85,30 @@ class HttpClient:
             return None
         self._throttle(urlsplit(url).netloc)
         try:
-            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True, stream=True)
         except requests.RequestException as exc:
             log.debug("fetch failed %s: %s", url, exc)
             return None
-        ctype = resp.headers.get("Content-Type", "")
-        if "html" not in ctype and "xml" not in ctype and "text" not in ctype:
-            return Page(url=resp.url, status=resp.status_code, text="", content_type=ctype)
-        return Page(url=resp.url, status=resp.status_code, text=resp.text, content_type=ctype)
+        try:
+            ctype = resp.headers.get("Content-Type", "")
+            if not any(t in ctype.lower() for t in _TEXTUAL):
+                return Page(url=resp.url, status=resp.status_code, text="", content_type=ctype)
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in resp.iter_content(64 * 1024):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size >= MAX_PAGE_BYTES:
+                    break
+            raw = b"".join(chunks)[:MAX_PAGE_BYTES]
+        except requests.RequestException as exc:
+            log.debug("read failed %s: %s", url, exc)
+            return None
+        finally:
+            resp.close()
+        # requests guesses ISO-8859-1 for text/* without a charset; the web is UTF-8.
+        encoding = resp.encoding if "charset=" in ctype.lower() and resp.encoding else "utf-8"
+        return Page(url=resp.url, status=resp.status_code, text=raw.decode(encoding, errors="replace"), content_type=ctype)
 
     def get_json(self, url: str, **kwargs: Any) -> Any:
         """GET a JSON API. Raises requests.HTTPError on non-2xx."""

@@ -1,0 +1,14 @@
+# Run on a server that allows outbound port 25 (or with a verification API key):
+#   docker compose run --rm leadgen doctor      # check the setup first
+#   docker compose up -d                        # then run every 6 hours in the background
+#   docker compose run --rm leadgen reverify    # re-check stored leads before a campaign
+services:
+  leadgen:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./output:/app/output
+    command: ["run", "--every", "6"]

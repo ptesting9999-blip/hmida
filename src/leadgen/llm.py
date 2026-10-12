@@ -38,14 +38,23 @@ class ResearchResult:
 
 
 class LLMUnavailable(RuntimeError):
-    """Raised when the API rejects our credentials; the run cannot continue."""
+    """Raised when there are no usable credentials; the run cannot continue."""
+
+
+def has_credentials(client: anthropic.Anthropic) -> bool:
+    """Without any of these the SDK only fails later, with a TypeError, on the first request."""
+    return any(getattr(client, attr, None) for attr in ("api_key", "auth_token", "credentials"))
 
 
 class LLM:
     def __init__(self, cfg: LLMConfig, client: Optional[anthropic.Anthropic] = None, api_key: Optional[str] = None):
         self.cfg = cfg
-        # With api_key=None the SDK resolves credentials itself (ANTHROPIC_API_KEY, auth token, profile).
-        self.client = client or anthropic.Anthropic(api_key=api_key, max_retries=4)
+        if client is None:
+            # With api_key=None the SDK resolves credentials itself (ANTHROPIC_API_KEY, auth token, profile).
+            client = anthropic.Anthropic(api_key=api_key, max_retries=4)
+            if not has_credentials(client):
+                raise LLMUnavailable("no Anthropic credentials found: set ANTHROPIC_API_KEY in .env")
+        self.client = client
 
     def _fallback_kwargs(self) -> dict[str, Any]:
         # Haiku has no server-side fallback; sending the parameter there is an error or a no-op.

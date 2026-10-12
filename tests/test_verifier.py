@@ -169,3 +169,17 @@ def test_catch_all_can_defer_to_provider_when_opted_in():
     assert lenient.verify("jane@yahoo.com").status == "deliverable"
     both = make(VerificationConfig(trust_provider_on_catch_all=True, confirmations_required="all"), prober=prober, provider=provider)
     assert both.verify("jane@yahoo.com").status == "unknown"
+
+
+def test_greylisting_is_marked_retryable():
+    class GreyProber(FakeProber):
+        def probe(self, domain, hosts, emails):
+            return SmtpProbe(host="mx", catch_all=None, results={e: RcptResult("temp", 451, "4.7.1 greylisted") for e in emails}, catch_all_outcome="temp")
+
+    r = make(prober=GreyProber()).verify("jane@acme.com")
+    assert r.status == "unknown" and r.retryable
+
+
+def test_blocked_probe_is_not_retryable():
+    r = make(prober=FakeProber(outcome_for_others="blocked")).verify("jane@acme.com")
+    assert r.status == "unknown" and not r.retryable

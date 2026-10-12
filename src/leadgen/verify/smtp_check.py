@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-import secrets
+import hashlib
 import smtplib
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Optional
@@ -51,6 +51,8 @@ class SmtpProbe:
     catch_all: Optional[bool]  # None: could not determine
     results: dict[str, RcptResult] = field(default_factory=dict)
     error: Optional[str] = None
+    # Outcome of the random-address RCPT; "temp" means greylisting hid the catch-all answer.
+    catch_all_outcome: Optional[RcptOutcome] = None
 
 
 def _decode(message: bytes | str) -> str:
@@ -122,6 +124,15 @@ class SmtpProber:
             error=last_error,
         )
 
+    def nonexistent_address(self, domain: str) -> str:
+        """An address that cannot exist, used for the catch-all test.
+
+        Stable per domain (not random per run) so a greylisting server sees the same
+        sender/recipient pair when the probe is retried and lets it through.
+        """
+        digest = hashlib.sha256(f"{domain}|{self.mail_from}".encode()).hexdigest()
+        return f"nx{digest[:18]}@{domain}"
+
     def _probe_host(self, host: str, domain: str, emails: list[str]) -> SmtpProbe:
         smtp = self.smtp_factory(timeout=self.timeout)
         try:
@@ -145,12 +156,12 @@ class SmtpProber:
                 results.setdefault(email, RcptResult("error", 421, "connection closed by server"))
 
             catch_all: Optional[bool] = None
+            outcome: Optional[RcptOutcome] = None
             if results and any(r.code != 421 for r in results.values()):
-                probe_addr = f"{secrets.token_hex(10)}@{domain}"
-                code, msg = smtp.rcpt(probe_addr)
+                code, msg = smtp.rcpt(self.nonexistent_address(domain))
                 outcome = classify_rcpt(code, msg)
                 catch_all = True if outcome == "accepted" else False if outcome == "rejected" else None
-            return SmtpProbe(host=host, catch_all=catch_all, results=results)
+            return SmtpProbe(host=host, catch_all=catch_all, results=results, catch_all_outcome=outcome)
         finally:
             try:
                 smtp.quit()

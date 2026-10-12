@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from datetime import datetime, timedelta
 
 from leadgen.config import RedditSourceConfig, SearchSourceConfig
@@ -161,3 +162,56 @@ def test_import_source(tmp_path):
     posts = list(ImportSource([str(f)]).collect(WINDOW, []))
     assert posts[0].platform == "linkedin" and posts[0].extra["website"] == "acme.com"
     assert posts[0].posted_at.date().isoformat() == "2026-10-09"
+
+
+def test_claude_backend_gets_one_query_per_platform():
+    class ClaudeLike(FakeBackend):
+        phrases_per_query = 100
+
+    backend = ClaudeLike([])
+    list(SearchSource(SearchSourceConfig(platforms=["linkedin", "instagram"]), backend).collect(WINDOW, []))
+    assert len(backend.queries) == 2
+    assert backend.queries[0].count(" OR ") == 17
+
+
+class FakeResponse:
+    def __init__(self, body: bytes, ctype: str, encoding=None):
+        self.body, self.headers, self.encoding = body, {"Content-Type": ctype}, encoding
+        self.url, self.status_code, self.closed = "https://acme.test/", 200, False
+
+    def iter_content(self, size):
+        for i in range(0, len(self.body), size):
+            yield self.body[i : i + size]
+
+    def close(self):
+        self.closed = True
+
+
+class FakeSession:
+    def __init__(self, response):
+        self.response, self.headers = response, {}
+
+    def get(self, url, **kw):
+        if url.endswith("/robots.txt"):
+            return SimpleNamespace(status_code=404, text="")
+        return self.response
+
+
+def test_fetch_page_caps_size_and_decodes_utf8():
+    from leadgen import http as http_mod
+
+    body = "Café owner: Zoë".encode() + b"x" * (http_mod.MAX_PAGE_BYTES + 500_000)
+    resp = FakeResponse(body, "text/html", encoding="ISO-8859-1")  # what requests guesses without a charset
+    client = http_mod.HttpClient("ua", per_host_delay=0, session=FakeSession(resp))
+    page = client.fetch_page("https://acme.test/")
+    assert page.text.startswith("Café owner: Zoë")
+    assert len(page.text.encode()) <= http_mod.MAX_PAGE_BYTES
+    assert resp.closed
+
+
+def test_fetch_page_skips_binary_content():
+    from leadgen import http as http_mod
+
+    resp = FakeResponse(b"%PDF-1.7", "application/pdf")
+    page = http_mod.HttpClient("ua", per_host_delay=0, session=FakeSession(resp)).fetch_page("https://acme.test/x.pdf")
+    assert page.text == ""

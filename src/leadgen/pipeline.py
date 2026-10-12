@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -12,7 +13,7 @@ from typing import Iterable, Optional
 
 from leadgen.config import Config
 from leadgen.dates import Window, utcnow
-from leadgen.enrich import BusinessContext, ContactFinder
+from leadgen.enrich import BusinessContext, ContactFinder, ContactPlan
 from leadgen.intent import IntentAssessment, IntentClassifier, prefilter
 from leadgen.llm import LLMUnavailable
 from leadgen.models import Lead, Person, RawPost, Rejection
@@ -84,6 +85,25 @@ def _real_name(name: Optional[str]) -> Optional[str]:
     return name
 
 
+@dataclass
+class PendingVerification:
+    """A qualified business whose best address got "try again later" (greylisting)."""
+
+    assessment: IntentAssessment
+    ctx: BusinessContext
+    plan: ContactPlan
+    deferred_at: float  # time.monotonic()
+
+
+@dataclass
+class PostOutcome:
+    post: RawPost
+    leads: list[Lead] = field(default_factory=list)
+    rejection: Optional[Rejection] = None
+    assessment: Optional[IntentAssessment] = None
+    retry: Optional[PendingVerification] = None
+
+
 class LeadAgent:
     def __init__(
         self,
@@ -106,6 +126,7 @@ class LeadAgent:
         self.writer = writer
         self.niche_researcher = niche_researcher
         self._save_lock = threading.Lock()
+        self._sleep = time.sleep
 
     # -- run ---------------------------------------------------------------------------
 
@@ -117,25 +138,57 @@ class LeadAgent:
         candidates = self._screen(self._collect(window, report.niches), window, report, limit)
         log.info("%d posts to assess with Claude", len(candidates))
 
+        deferred: list[PostOutcome] = []
         pool = ThreadPoolExecutor(max_workers=self.cfg.workers)
         try:
-            for post, leads, rejection, assessed in pool.map(self._process_safely, candidates):
-                if assessed is not None:
-                    report.classified += 1
-                    report.qualified += int(rejection is None or rejection.stage != "intent")
-                if rejection is not None:
-                    report.rejections.append(rejection)
-                report.leads += leads
-                for lead in leads:
-                    log.info("LEAD %s <%s> posted %s on %s", lead.business_name, lead.email, lead.posted_at.date(), lead.platform)
-                if not (rejection is not None and rejection.stage == "error"):
-                    outcome = "lead" if leads else rejection.stage if rejection else "done"
-                    self.store.mark_seen(post.key, post.url, outcome)
+            for outcome in pool.map(self._process_safely, candidates):
+                if outcome.retry is not None:
+                    deferred.append(outcome)
+                else:
+                    self._record(outcome, report)
+            for outcome in self._retry_greylisted(deferred):
+                self._record(outcome, report)
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
             # Even if the run is cut short, hand over the leads found so far.
             report.files = self.writer.write(report.leads, report.rejections, report.started_at)
         return report
+
+    def _record(self, outcome: PostOutcome, report: RunReport) -> None:
+        post, rejection = outcome.post, outcome.rejection
+        if outcome.assessment is not None:
+            report.classified += 1
+            report.qualified += int(rejection is None or rejection.stage != "intent")
+        if rejection is not None:
+            report.rejections.append(rejection)
+        report.leads += outcome.leads
+        for lead in outcome.leads:
+            log.info("LEAD %s <%s> posted %s on %s", lead.business_name, lead.email, lead.posted_at.date(), lead.platform)
+        # Errors stay unseen so the next run retries them.
+        if not (rejection is not None and rejection.stage == "error"):
+            stage = "lead" if outcome.leads else rejection.stage if rejection else "done"
+            self.store.mark_seen(post.key, post.url, stage)
+
+    def _retry_greylisted(self, deferred: list[PostOutcome]) -> Iterable[PostOutcome]:
+        if not deferred:
+            return
+        delay = self.cfg.verification.greylist_retry_seconds
+        ready_at = max(o.retry.deferred_at for o in deferred if o.retry) + delay
+        log.info("%d businesses hit mail-server greylisting; re-checking in %.0fs", len(deferred), max(0.0, ready_at - time.monotonic()))
+        wait = ready_at - time.monotonic()
+        if wait > 0:
+            self._sleep(wait)
+        for outcome in deferred:
+            pending = outcome.retry
+            assert pending is not None
+            try:
+                leads, rejection, _ = self._deliver(outcome.post, pending.assessment, pending.ctx, pending.plan, allow_retry=False)
+            except LLMUnavailable:
+                raise
+            except Exception as exc:
+                log.exception("greylist retry failed for %s", outcome.post.url)
+                leads, rejection = [], Rejection(outcome.post.url, outcome.post.platform, "error", f"{exc.__class__.__name__}: {exc}")
+            yield PostOutcome(outcome.post, leads, rejection, pending.assessment)
 
     def _collect(self, window: Window, niches: list[NicheTarget]) -> Iterable[RawPost]:
         for source in self.sources:
@@ -176,26 +229,23 @@ class LeadAgent:
 
     # -- per post ----------------------------------------------------------------------
 
-    def _process_safely(
-        self, post: RawPost
-    ) -> tuple[RawPost, list[Lead], Optional[Rejection], Optional[IntentAssessment]]:
+    def _process_safely(self, post: RawPost) -> PostOutcome:
         try:
-            leads, rejection, assessed = self.process(post)
-            return post, leads, rejection, assessed
+            return self.process(post)
         except LLMUnavailable:
             raise
         except Exception as exc:
             log.exception("failed to process %s", post.url)
-            return post, [], Rejection(post.url, post.platform, "error", f"{exc.__class__.__name__}: {exc}"), None
+            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "error", f"{exc.__class__.__name__}: {exc}"))
 
-    def process(self, post: RawPost) -> tuple[list[Lead], Optional[Rejection], Optional[IntentAssessment]]:
+    def process(self, post: RawPost) -> PostOutcome:
         a = self.classifier.assess(post)
         if a is None:
             # Transient failure: leave the post unseen so the next run retries it.
-            return [], Rejection(post.url, post.platform, "error", "Claude could not assess the post"), None
+            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "error", "Claude could not assess the post"))
         reason = self.classifier.accept(a)
         if reason:
-            return [], Rejection(post.url, post.platform, "intent", reason, a.business_name or ""), a
+            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "intent", reason, a.business_name or ""), assessment=a)
 
         content_lower = post.content().lower()
         ctx = BusinessContext(
@@ -212,12 +262,25 @@ class LeadAgent:
         plan = self.finder.plan(ctx)
         business = ctx.business_name or plan.domain or ""
         if not plan.decision_makers:
-            return [], Rejection(post.url, post.platform, "contacts", "; ".join(plan.notes), business), a
+            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "contacts", "; ".join(plan.notes), business), assessment=a)
         if plan.domain and self.store.domain_delivered_since(plan.domain, BUSINESS_COOLDOWN_DAYS):
-            return [], Rejection(post.url, post.platform, "duplicate", f"lead for {plan.domain} already delivered", business), a
+            rejection = Rejection(post.url, post.platform, "duplicate", f"lead for {plan.domain} already delivered", business)
+            return PostOutcome(post, rejection=rejection, assessment=a)
 
+        allow_retry = self.cfg.verification.greylist_retry_seconds > 0
+        leads, rejection, greylisted = self._deliver(post, a, ctx, plan, allow_retry=allow_retry)
+        if greylisted:
+            return PostOutcome(post, assessment=a, retry=PendingVerification(a, ctx, plan, time.monotonic()))
+        return PostOutcome(post, leads, rejection, a)
+
+    def _deliver(
+        self, post: RawPost, a: IntentAssessment, ctx: BusinessContext, plan: ContactPlan, allow_retry: bool
+    ) -> tuple[list[Lead], Optional[Rejection], bool]:
+        """Verify each decision-maker's candidates and save leads. Returns (leads, rejection, retry_later)."""
+        business = ctx.business_name or plan.domain or ""
         leads: list[Lead] = []
         failures: list[str] = []
+        greylisted = False
         max_contacts = self.cfg.enrichment.max_contacts_per_business
         for dm in plan.decision_makers:
             if len(leads) >= max_contacts:
@@ -228,6 +291,7 @@ class LeadAgent:
             results = self.verifier.verify_many([c.email for c in dm.candidates], stop_at_first=True)
             chosen = next((c for c in dm.candidates if results[c.email].deliverable), None)
             if chosen is None:
+                greylisted = greylisted or any(results[c.email].retryable for c in dm.candidates)
                 best = dm.candidates[0]
                 failures.append(f"{dm.person.name}: {best.email} {results[best.email].status} ({results[best.email].reason})")
                 continue
@@ -242,9 +306,14 @@ class LeadAgent:
                     continue
                 self.store.save_lead(lead, business_key)
             leads.append(lead)
-        if not leads:
-            return [], Rejection(post.url, post.platform, "verify", " | ".join(failures)[:500], business), a
-        return leads, None, a
+        if leads:
+            return leads, None, False
+        if greylisted and allow_retry:
+            return [], None, True
+        reason = " | ".join(failures)[:500]
+        if greylisted:
+            reason = "still greylisted after retry: " + reason
+        return [], Rejection(post.url, post.platform, "verify", reason[:500], business), False
 
     def _lead(
         self,
