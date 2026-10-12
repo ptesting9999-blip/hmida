@@ -1,0 +1,144 @@
+"""Command line: leadgen run | niches | verify | suppress | export"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+from leadgen.compliance import Suppression
+from leadgen.config import Config, Secrets, load_config, load_dotenv
+from leadgen.dates import utcnow
+from leadgen.factory import SetupError, build_agent, make_http, make_llm, make_verifier
+from leadgen.llm import LLMUnavailable
+from leadgen.niches import NicheResearcher
+from leadgen.output import LEAD_COLUMNS, write_csv
+from leadgen.store import Store
+
+log = logging.getLogger("leadgen")
+
+
+def _config(path: Optional[str]) -> Config:
+    if path is None and Path("config.yaml").is_file():
+        path = "config.yaml"
+    return load_config(path)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    cfg = _config(args.config)
+    if args.days is not None:
+        cfg.window.max_age_days = args.days
+    if args.min_days is not None:
+        cfg.window.min_age_days = args.min_days
+    cfg = Config.model_validate(cfg.model_dump())  # re-validate overrides
+    agent = build_agent(cfg, Secrets.from_env())
+    while True:
+        report = agent.run(limit=args.limit)
+        print(report.summary())
+        if not args.every:
+            return 0
+        log.info("next run in %.1f hours (Ctrl+C to stop)", args.every)
+        time.sleep(args.every * 3600)
+
+
+def cmd_niches(args: argparse.Namespace) -> int:
+    cfg = _config(args.config)
+    secrets = Secrets.from_env()
+    store = Store(cfg.db_path)
+    niches = NicheResearcher(cfg, make_llm(cfg, secrets), store).get(refresh=args.refresh)
+    if not niches:
+        print("No niches yet (research disabled or returned nothing).")
+    for n in niches:
+        print(f"\n## {n.name}\n{n.rationale}")
+        for q in n.search_queries:
+            print(f"  query: {q}")
+        if n.subreddits:
+            print(f"  subreddits: {', '.join('r/' + s for s in n.subreddits)}")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    cfg = _config(args.config)
+    _, api_http = make_http(cfg)
+    verifier = make_verifier(cfg, Secrets.from_env(), None, api_http)
+    worst = 0
+    for email in args.emails:
+        r = verifier.verify(email)
+        print(f"{email}: {r.status.upper()} - {r.reason}")
+        for k, v in r.checks.items():
+            print(f"    {k}: {v}")
+        worst = max(worst, 0 if r.deliverable else 1)
+    return worst
+
+
+def cmd_suppress(args: argparse.Namespace) -> int:
+    cfg = _config(args.config)
+    s = Suppression(cfg.suppression_file)
+    for entry in args.entries:
+        s.add(entry)
+        print(f"suppressed {entry}")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    cfg = _config(args.config)
+    rows = Store(cfg.db_path).all_leads()
+    out = Path(args.out or f"{cfg.output.dir}/all_leads_{utcnow():%Y%m%d}.csv")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(out, rows, LEAD_COLUMNS)
+    print(f"exported {len(rows)} leads to {out}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-c", "--config", help="YAML config (default: ./config.yaml if present)")
+    common.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+
+    p = argparse.ArgumentParser(prog="leadgen", description="Intent-based lead generation agent for SMMA / ads agencies")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", parents=[common], help="find, qualify, enrich and verify new leads")
+    run.add_argument("--days", type=int, help="max post age in days (overrides window.max_age_days)")
+    run.add_argument("--min-days", type=int, help="min post age in days (overrides window.min_age_days)")
+    run.add_argument("--limit", type=int, help="assess at most N new posts (useful for a first test)")
+    run.add_argument("--every", type=float, metavar="HOURS", help="keep running, once every HOURS")
+    run.set_defaults(func=cmd_run)
+
+    niches = sub.add_parser("niches", parents=[common], help="show (or refresh) the niches the agent is targeting")
+    niches.add_argument("--refresh", action="store_true", help="re-run the web research now")
+    niches.set_defaults(func=cmd_niches)
+
+    verify = sub.add_parser("verify", parents=[common], help="run the strict verification on email addresses")
+    verify.add_argument("emails", nargs="+")
+    verify.set_defaults(func=cmd_verify)
+
+    suppress = sub.add_parser("suppress", parents=[common], help="never contact these emails / domains")
+    suppress.add_argument("entries", nargs="+", help="jane@acme.com or acme.com")
+    suppress.set_defaults(func=cmd_suppress)
+
+    export = sub.add_parser("export", parents=[common], help="export every lead delivered so far to CSV")
+    export.add_argument("--out", help="output CSV path")
+    export.set_defaults(func=cmd_export)
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    for noisy in ("urllib3", "httpx", "httpx2", "anthropic"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    load_dotenv()
+    try:
+        return args.func(args)
+    except (SetupError, LLMUnavailable, FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130

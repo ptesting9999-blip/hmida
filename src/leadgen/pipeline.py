@@ -1,0 +1,281 @@
+"""The agent loop: collect -> date window -> prefilter -> Claude intent check -> find decision-makers
+-> strict email verification -> save."""
+
+from __future__ import annotations
+
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable, Optional
+
+from leadgen.config import Config
+from leadgen.dates import Window, utcnow
+from leadgen.enrich import BusinessContext, ContactFinder
+from leadgen.intent import IntentAssessment, IntentClassifier, prefilter
+from leadgen.llm import LLMUnavailable
+from leadgen.models import Lead, Person, RawPost, Rejection
+from leadgen.niches import NicheResearcher
+from leadgen.output import OutputWriter
+from leadgen.sources.base import NicheTarget, Source
+from leadgen.store import Store
+from leadgen.verify import EmailVerifier
+
+log = logging.getLogger(__name__)
+
+PLATFORM_LABELS = {
+    "linkedin": "LinkedIn",
+    "instagram": "Instagram",
+    "facebook": "Facebook",
+    "x": "X (Twitter)",
+    "threads": "Threads",
+    "tiktok": "TikTok",
+    "reddit": "Reddit",
+    "craigslist": "Craigslist",
+    "upwork": "Upwork",
+    "nextdoor": "Nextdoor",
+    "web": "Web",
+}
+# Don't hand over the same business twice within this many days.
+BUSINESS_COOLDOWN_DAYS = 60
+
+
+@dataclass
+class RunReport:
+    started_at: datetime
+    window: Window
+    niches: list[NicheTarget] = field(default_factory=list)
+    collected: int = 0
+    already_seen: int = 0
+    out_of_window: int = 0
+    prefiltered: int = 0
+    classified: int = 0
+    qualified: int = 0
+    leads: list[Lead] = field(default_factory=list)
+    rejections: list[Rejection] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        by_stage: dict[str, int] = {}
+        for r in self.rejections:
+            by_stage[r.stage] = by_stage.get(r.stage, 0) + 1
+        lines = [
+            f"Window: posts from {self.window.describe()}",
+            f"Niches monitored: {', '.join(n.name for n in self.niches) or 'none'}",
+            f"Collected {self.collected} posts ({self.already_seen} already processed in earlier runs)",
+            f"Outside the date window or undated: {self.out_of_window}",
+            f"Dropped by keyword prefilter: {self.prefiltered}",
+            f"Assessed by Claude: {self.classified}; qualified as warm: {self.qualified}",
+            f"Verified leads saved: {len(self.leads)}",
+        ]
+        if by_stage:
+            lines.append("Rejections by stage: " + ", ".join(f"{k}={v}" for k, v in sorted(by_stage.items())))
+        lines += [f"Wrote {f}" for f in self.files]
+        return "\n".join(lines)
+
+
+def _real_name(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    name = name.strip()
+    if not name or name.startswith(("u/", "/u/", "@")):
+        return None
+    return name
+
+
+class LeadAgent:
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        sources: list[Source],
+        classifier: IntentClassifier,
+        finder: ContactFinder,
+        verifier: EmailVerifier,
+        store: Store,
+        writer: OutputWriter,
+        niche_researcher: Optional[NicheResearcher] = None,
+    ) -> None:
+        self.cfg = cfg
+        self.sources = sources
+        self.classifier = classifier
+        self.finder = finder
+        self.verifier = verifier
+        self.store = store
+        self.writer = writer
+        self.niche_researcher = niche_researcher
+        self._save_lock = threading.Lock()
+
+    # -- run ---------------------------------------------------------------------------
+
+    def run(self, limit: Optional[int] = None, now: Optional[datetime] = None) -> RunReport:
+        window = Window.from_days(self.cfg.window.max_age_days, self.cfg.window.min_age_days, now=now)
+        report = RunReport(started_at=window.now, window=window)
+        report.niches = self.niche_researcher.get() if self.niche_researcher else []
+
+        candidates = self._screen(self._collect(window, report.niches), window, report, limit)
+        log.info("%d posts to assess with Claude", len(candidates))
+
+        pool = ThreadPoolExecutor(max_workers=self.cfg.workers)
+        try:
+            for post, leads, rejection, assessed in pool.map(self._process_safely, candidates):
+                if assessed is not None:
+                    report.classified += 1
+                    report.qualified += int(rejection is None or rejection.stage != "intent")
+                if rejection is not None:
+                    report.rejections.append(rejection)
+                report.leads += leads
+                for lead in leads:
+                    log.info("LEAD %s <%s> posted %s on %s", lead.business_name, lead.email, lead.posted_at.date(), lead.platform)
+                if not (rejection is not None and rejection.stage == "error"):
+                    outcome = "lead" if leads else rejection.stage if rejection else "done"
+                    self.store.mark_seen(post.key, post.url, outcome)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            # Even if the run is cut short, hand over the leads found so far.
+            report.files = self.writer.write(report.leads, report.rejections, report.started_at)
+        return report
+
+    def _collect(self, window: Window, niches: list[NicheTarget]) -> Iterable[RawPost]:
+        for source in self.sources:
+            log.info("collecting from %s", source.name)
+            try:
+                yield from source.collect(window, niches)
+            except LLMUnavailable:
+                raise
+            except Exception:  # one broken source must not stop the others
+                log.exception("source %s failed", source.name)
+
+    def _screen(self, posts: Iterable[RawPost], window: Window, report: RunReport, limit: Optional[int]) -> list[RawPost]:
+        keep: list[RawPost] = []
+        keys: set[str] = set()
+        for post in posts:
+            report.collected += 1
+            if post.key in keys:
+                continue
+            keys.add(post.key)
+            if self.store.is_seen(post.key):
+                report.already_seen += 1
+                continue
+            if not window.contains(post.posted_at):
+                report.out_of_window += 1
+                reason = "no reliable post date" if post.posted_at is None else f"posted {post.posted_at.date()}"
+                report.rejections.append(Rejection(post.url, post.platform, "date", reason))
+                continue
+            reason = prefilter(post)
+            if reason:
+                report.prefiltered += 1
+                report.rejections.append(Rejection(post.url, post.platform, "prefilter", reason))
+                self.store.mark_seen(post.key, post.url, "prefilter")
+                continue
+            keep.append(post)
+            if limit is not None and len(keep) >= limit:
+                break
+        return keep
+
+    # -- per post ----------------------------------------------------------------------
+
+    def _process_safely(
+        self, post: RawPost
+    ) -> tuple[RawPost, list[Lead], Optional[Rejection], Optional[IntentAssessment]]:
+        try:
+            leads, rejection, assessed = self.process(post)
+            return post, leads, rejection, assessed
+        except LLMUnavailable:
+            raise
+        except Exception as exc:
+            log.exception("failed to process %s", post.url)
+            return post, [], Rejection(post.url, post.platform, "error", f"{exc.__class__.__name__}: {exc}"), None
+
+    def process(self, post: RawPost) -> tuple[list[Lead], Optional[Rejection], Optional[IntentAssessment]]:
+        a = self.classifier.assess(post)
+        if a is None:
+            # Transient failure: leave the post unseen so the next run retries it.
+            return [], Rejection(post.url, post.platform, "error", "Claude could not assess the post"), None
+        reason = self.classifier.accept(a)
+        if reason:
+            return [], Rejection(post.url, post.platform, "intent", reason, a.business_name or ""), a
+
+        content_lower = post.content().lower()
+        ctx = BusinessContext(
+            business_name=a.business_name or post.extra.get("business_name"),
+            website=a.business_website or post.extra.get("website"),
+            location=a.business_location,
+            poster=Person(name=_real_name(a.poster_name), role=a.poster_role, source="post")
+            if _real_name(a.poster_name)
+            else None,
+            poster_is_decision_maker=a.poster_is_decision_maker,
+            # Only addresses that really appear in the post, never model output alone.
+            emails_in_post=[e for e in a.emails_in_post if e.lower() in content_lower],
+        )
+        plan = self.finder.plan(ctx)
+        business = ctx.business_name or plan.domain or ""
+        if not plan.decision_makers:
+            return [], Rejection(post.url, post.platform, "contacts", "; ".join(plan.notes), business), a
+        if plan.domain and self.store.domain_delivered_since(plan.domain, BUSINESS_COOLDOWN_DAYS):
+            return [], Rejection(post.url, post.platform, "duplicate", f"lead for {plan.domain} already delivered", business), a
+
+        leads: list[Lead] = []
+        failures: list[str] = []
+        max_contacts = self.cfg.enrichment.max_contacts_per_business
+        for dm in plan.decision_makers:
+            if len(leads) >= max_contacts:
+                break
+            if not dm.candidates:
+                failures.append(f"{dm.person.name}: no candidate addresses")
+                continue
+            results = self.verifier.verify_many([c.email for c in dm.candidates], stop_at_first=True)
+            chosen = next((c for c in dm.candidates if results[c.email].deliverable), None)
+            if chosen is None:
+                best = dm.candidates[0]
+                failures.append(f"{dm.person.name}: {best.email} {results[best.email].status} ({results[best.email].reason})")
+                continue
+            lead = self._lead(post, a, ctx, plan.domain, dm.person, chosen.email, chosen.source, results[chosen.email].reason)
+            # Without a business domain (e.g. an owner's gmail) the address itself is the dedupe key.
+            business_key = plan.domain or chosen.email
+            with self._save_lock:  # posts are processed in parallel; check-and-save atomically
+                if self.store.lead_exists(chosen.email) or (
+                    not leads and self.store.domain_delivered_since(business_key, BUSINESS_COOLDOWN_DAYS)
+                ):
+                    failures.append(f"{chosen.email} already delivered")
+                    continue
+                self.store.save_lead(lead, business_key)
+            leads.append(lead)
+        if not leads:
+            return [], Rejection(post.url, post.platform, "verify", " | ".join(failures)[:500], business), a
+        return leads, None, a
+
+    def _lead(
+        self,
+        post: RawPost,
+        a: IntentAssessment,
+        ctx: BusinessContext,
+        domain: Optional[str],
+        person: Person,
+        email: str,
+        email_source: str,
+        verification: str,
+    ) -> Lead:
+        assert post.posted_at is not None and post.date_source is not None
+        return Lead(
+            email=email,
+            contact_name=person.name or "",
+            contact_role=person.role or ("Decision-maker (per post)" if person.source == "post" else ""),
+            business_name=ctx.business_name or domain or "",
+            business_website=f"https://{domain}" if domain else "",
+            platform=PLATFORM_LABELS.get(post.platform, post.platform.capitalize()),
+            intent_type=a.intent_type,
+            intent_url=post.url,
+            posted_at=post.posted_at,
+            date_source=post.date_source,
+            services_needed=", ".join(a.services_needed),
+            niche=a.niche or post.niche or "",
+            location=a.business_location or "",
+            intent_score=a.intent_score,
+            summary=a.summary,
+            post_excerpt=post.content()[:280],
+            email_source=email_source,
+            verification=verification,
+            found_at=utcnow(),
+        )
