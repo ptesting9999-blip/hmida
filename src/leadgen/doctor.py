@@ -215,6 +215,10 @@ class Doctor:
                 )
 
         provider_ok = provider is not None and provider.status == "ok"
+        if v.max_inactive_days is not None and not (provider_ok and provider is not None and provider.name == "ZeroBounce"):
+            checks.append(Check("Dormant mailboxes", "warn",
+                                "inactive mailboxes can't be detected: only ZeroBounce reports mailbox activity",
+                                "add ZEROBOUNCE_API_KEY to filter dormant inboxes (exports show 'activity: unknown' until then)"))
         if not smtp_ok and provider is not None and provider.status == "warn":
             checks.append(Check("Email verification", "warn", f"depends entirely on {provider.name}, whose key could not be confirmed",
                                 "re-run doctor once the verification API is reachable"))

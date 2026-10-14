@@ -67,12 +67,14 @@ class HttpClient:
             rp: Optional[robotparser.RobotFileParser] = robotparser.RobotFileParser()
             try:
                 resp = self.session.get(f"{base}/robots.txt", timeout=self.timeout)
-                if resp.status_code >= 400:
+                if resp.status_code >= 500 or resp.status_code == 429:
+                    rp.parse(["User-agent: *", "Disallow: /"])  # RFC 9309: unreachable means disallow
+                elif resp.status_code >= 400:
                     rp = None  # no robots.txt: everything allowed
                 else:
                     rp.parse(resp.text.splitlines())
             except requests.RequestException:
-                rp = None
+                rp.parse(["User-agent: *", "Disallow: /"])
             with self._lock:
                 self._robots[base] = rp
             cached = rp
@@ -108,7 +110,11 @@ class HttpClient:
             resp.close()
         # requests guesses ISO-8859-1 for text/* without a charset; the web is UTF-8.
         encoding = resp.encoding if "charset=" in ctype.lower() and resp.encoding else "utf-8"
-        return Page(url=resp.url, status=resp.status_code, text=raw.decode(encoding, errors="replace"), content_type=ctype)
+        try:
+            text = raw.decode(encoding, errors="replace")
+        except LookupError:  # unknown charset label such as "utf8mb4"
+            text = raw.decode("utf-8", errors="replace")
+        return Page(url=resp.url, status=resp.status_code, text=text, content_type=ctype)
 
     def get_json(self, url: str, **kwargs: Any) -> Any:
         """GET a JSON API. Raises requests.HTTPError on non-2xx."""

@@ -63,7 +63,7 @@ def make_search_backend(cfg: Config, secrets: Secrets, api_http: HttpClient, llm
         return SerperSearch(secrets.serper_api_key, api_http)
     if choice in ("brave", "serper"):
         raise SetupError(f"search provider {choice!r} selected but {choice.upper()}_API_KEY is not set")
-    return ClaudeWebSearch(llm)
+    return ClaudeWebSearch(llm, max_searches=cfg.llm.max_web_searches)
 
 
 def make_verification_provider(cfg: Config, secrets: Secrets, api_http: HttpClient) -> Optional[VerificationProvider]:
@@ -152,4 +152,5 @@ def build_agent(cfg: Config, secrets: Secrets) -> LeadAgent:
         store=store,
         writer=OutputWriter(cfg.output, webhook_url=secrets.leadgen_webhook_url),
         niche_researcher=NicheResearcher(cfg, llm, store),
+        preflight=llm.preflight,
     )

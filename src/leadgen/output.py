@@ -13,7 +13,7 @@ from typing import Any, Iterable, Optional
 import requests
 
 from leadgen.config import OutputConfig
-from leadgen.models import Lead, Rejection
+from leadgen.models import Rejection
 
 log = logging.getLogger(__name__)
 
@@ -97,10 +97,10 @@ class OutputWriter:
         self.dir = Path(cfg.dir)
         self.webhook_url = webhook_url
 
-    def write(self, leads: list[Lead], rejections: list[Rejection], started_at: datetime) -> list[str]:
+    def write(self, rows: list[dict[str, Any]], rejections: list[Rejection], started_at: datetime) -> list[str]:
+        """Write lead rows (Lead.as_row() dicts) plus the run's rejections."""
         self.dir.mkdir(parents=True, exist_ok=True)
         stamp = started_at.strftime("%Y%m%d-%H%M%S")
-        rows = [lead.as_row() for lead in leads]
         files: list[str] = []
         if "csv" in self.cfg.formats:
             path = self.dir / f"leads_{stamp}.csv"

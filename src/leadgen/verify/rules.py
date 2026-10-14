@@ -20,11 +20,25 @@ ROLE_ACCOUNTS = frozenset(
     noreply donotreply postmaster hostmaster webmaster abuse security privacy legal compliance service
     services customerservice customersupport customercare care feedback orders order shop store booking
     bookings book reservations reservation reception frontdesk studio gym clinic events partners
-    partnerships bizdev general all everyone staff social socialmedia ads advertising it tech dev ops
+    partnerships bizdev general all everyone staff social socialmedia ads advertising it tech ops
     operations root sysadmin test demo welcome reply notifications alerts membership members community
-    wholesale collab collabs hire hiring admissions enquire contacto kontakt bonjour hallo
+    wholesale collab collabs hire hiring admissions enquire contacto kontakt bonjour hallo hola ciao
+    ventas reservas anfragen appointments appointment frontoffice frontdesk mailerdaemon daemon
+    accountspayable payable receivable salesteam infodesk helpline
     """.split()
 )
+# Generic words that mark a qualified inbox: info.uk@, sales-london@, bookings.miami@ (word first)
+# or nyc.info@, acme.sales@acme.com (word last, after a short code or the company's own name).
+# jane.sales@ stays personal.
+STRONG_ROLE_WORDS = frozenset(
+    """
+    info information support sales contact contactus enquiries enquiry inquiries inquiry hello
+    helpdesk bookings booking orders reception noreply donotreply reservations careers billing
+    """.split()
+)
+# A role word glued to one of these is still generic: salesteam@, marketingdept@, contactme@.
+_ROLE_SUFFIXES = ("team", "desk", "dept", "department", "group", "office", "hq", "me", "us", "mail", "line")
+_GENERIC_PREFIXES = ("info", "contact", "support", "enquir", "inquir", "hello", "booking", "reservation")
 
 FREE_PROVIDERS = frozenset(
     """
@@ -63,13 +77,22 @@ def normalized_local(local: str) -> str:
 
 
 def is_role_account(email: str) -> bool:
-    """info@, support2@, customer-care@, sales.team@ ... (every part of the local is a role word)."""
-    local, _ = split_email(email)
+    """Generic inboxes rather than a person: info@, support2@, customer-care@, sales.team@,
+    info.uk@, salesteam@, contactme@, hola@ ..."""
+    local, domain = split_email(email)
     base = local.lower().split("+", 1)[0]
-    if normalized_local(base) in ROLE_ACCOUNTS:
+    joined = normalized_local(base)
+    if joined in ROLE_ACCOUNTS or joined.startswith(_GENERIC_PREFIXES):
+        return True
+    if any(joined == word + suffix for word in ROLE_ACCOUNTS for suffix in _ROLE_SUFFIXES):
         return True
     tokens = [t for t in (re.sub(r"\d", "", part) for part in re.split(r"[._\-]", base)) if t]
-    return bool(tokens) and all(t in ROLE_ACCOUNTS for t in tokens)
+    if not tokens:
+        return False
+    if all(t in ROLE_ACCOUNTS for t in tokens) or tokens[0] in STRONG_ROLE_WORDS:
+        return True
+    brand = domain.split(".")[0]
+    return tokens[-1] in STRONG_ROLE_WORDS and all(len(t) <= 3 or t == brand for t in tokens[:-1])
 
 
 def is_free_provider(email_or_domain: str) -> bool:

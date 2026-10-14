@@ -155,7 +155,7 @@ class FakeBackend:
     def __init__(self, hits):
         self.hits = hits
 
-    def search(self, query, window, limit):
+    def search(self, query, window, limit, niche=None):
         return self.hits
 
 

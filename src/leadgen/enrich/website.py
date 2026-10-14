@@ -46,6 +46,8 @@ class SiteProfile:
     pages: list[SitePage] = field(default_factory=list)
     emails: set[str] = field(default_factory=set)
     people: list[Person] = field(default_factory=list)
+    # Where the homepage ended up after redirects (acme.com -> acmefitness.com).
+    final_domain: Optional[str] = None
 
     @property
     def reachable(self) -> bool:
@@ -116,24 +118,33 @@ def _types(item: dict[str, Any]) -> set[str]:
     return {x.lower() for x in ([t] if isinstance(t, str) else t if isinstance(t, list) else [])}
 
 
+def _jsonld_text(value: Any) -> Optional[str]:
+    """JSON-LD values may be a string, {"@value": ...}, or a list of either."""
+    if isinstance(value, list):
+        value = next((v for v in value if isinstance(v, (str, dict))), None)
+    if isinstance(value, dict):
+        value = value.get("@value")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def extract_jsonld_people(soup: BeautifulSoup) -> list[Person]:
     people: list[Person] = []
     for item in _iter_jsonld(soup):
         types = _types(item)
-        if "person" in types and isinstance(item.get("name"), str):
+        if "person" in types and _jsonld_text(item.get("name")):
             people.append(
                 Person(
-                    name=item["name"].strip(),
-                    role=item.get("jobTitle") if isinstance(item.get("jobTitle"), str) else None,
+                    name=_jsonld_text(item.get("name")),
+                    role=_jsonld_text(item.get("jobTitle")),
                     email=_clean_email(str(item["email"]).removeprefix("mailto:")) if item.get("email") else None,
                     source="jsonld",
                 )
             )
         founders = item.get("founder")
         for f in founders if isinstance(founders, list) else [founders] if founders else []:
-            name = f.get("name") if isinstance(f, dict) else f if isinstance(f, str) else None
+            name = _jsonld_text(f.get("name") if isinstance(f, dict) else f)
             if name:
-                people.append(Person(name=name.strip(), role="Founder", source="jsonld"))
+                people.append(Person(name=name, role="Founder", source="jsonld"))
     # A founder object is also a Person node, so the same name can appear twice.
     merged: dict[str, Person] = {}
     for p in people:
@@ -152,13 +163,14 @@ def visible_text(soup: BeautifulSoup) -> str:
     return re.sub(r"\s+", " ", soup.get_text(" ")).strip()
 
 
-def candidate_links(soup: BeautifulSoup, base_url: str, domain: str) -> list[str]:
+def candidate_links(soup: BeautifulSoup, base_url: str, domain: str | tuple[str, ...]) -> list[str]:
+    domains = (domain,) if isinstance(domain, str) else domain
     scored: dict[str, int] = {}
     for a in soup.find_all("a", href=True):
         url = urljoin(base_url, a["href"]).split("#", 1)[0]
         parts = urlsplit(url)
         host = (parts.hostname or "").removeprefix("www.")
-        if parts.scheme not in ("http", "https") or not (host == domain or host.endswith("." + domain)):
+        if parts.scheme not in ("http", "https") or not any(host == d or host.endswith("." + d) for d in domains):
             continue
         hay = f"{parts.path} {a.get_text(' ')}".lower()
         score = sum(1 for k in PAGE_KEYWORDS if k in hay)
@@ -183,6 +195,10 @@ class WebsiteCrawler:
         if home is None:
             return profile
         profile.base_url = home.url
+        final = (urlsplit(home.url).hostname or "").lower().removeprefix("www.")
+        if final and final != domain:
+            profile.final_domain = final
+        site_domains = tuple(dict.fromkeys(d for d in (domain, final) if d))
         queue = [home.url]
         visited: set[str] = set()
         first = True
@@ -195,12 +211,16 @@ class WebsiteCrawler:
             first = False
             if page is None or page.status >= 400 or not page.text:
                 continue
-            soup = BeautifulSoup(page.text, "html.parser")
-            profile.people += extract_jsonld_people(soup)
-            links = candidate_links(soup, page.url, domain) if len(visited) == 1 else []
-            raw_text = soup.get_text(" ")
-            profile.emails |= extract_emails(soup, raw_text)
-            profile.pages.append(SitePage(url=page.url, text=visible_text(soup)))
+            try:
+                soup = BeautifulSoup(page.text, "html.parser")
+                profile.people += extract_jsonld_people(soup)
+                links = candidate_links(soup, page.url, site_domains) if len(visited) == 1 else []
+                raw_text = soup.get_text(" ")
+                profile.emails |= extract_emails(soup, raw_text)
+                profile.pages.append(SitePage(url=page.url, text=visible_text(soup)))
+            except Exception as exc:  # one malformed page must not lose the whole business
+                log.debug("could not parse %s: %s", page.url, exc)
+                continue
             queue += [u for u in links if u not in visited]
         log.debug("crawled %s: %d pages, %d emails", domain, len(profile.pages), len(profile.emails))
         return profile

@@ -8,7 +8,7 @@ import pytest
 
 from leadgen.config import Config, LLMConfig
 from leadgen.intent import IntentAssessment, IntentClassifier, build_user_message, prefilter
-from leadgen.llm import FALLBACK_BETA, LLM, LLMUnavailable
+from leadgen.llm import FALLBACK_BETA, LLM, LLMTransient, LLMUnavailable
 from leadgen.models import RawPost
 from leadgen.niches import NicheResearcher
 from leadgen.store import Store
@@ -94,10 +94,29 @@ def test_auth_error_stops_the_run():
         llm.parse(IntentAssessment, system="s", user="u", effort="low")
 
 
-def test_server_error_skips_item():
+def test_server_error_is_transient():
     err = {"type": "error", "error": {"type": "api_error", "message": "boom"}}
     llm = LLM(LLMConfig(), client=mock_client(lambda b: (500, err), []))
+    with pytest.raises(LLMTransient):
+        llm.parse(IntentAssessment, system="s", user="u", effort="low")
+
+
+def test_truncated_or_invalid_output_returns_none():
+    llm = LLM(LLMConfig(), client=mock_client(lambda b: (200, message('{"intent_type": "expl', stop_reason="max_tokens")), []))
     assert llm.parse(IntentAssessment, system="s", user="u", effort="low") is None
+    llm = LLM(LLMConfig(), client=mock_client(lambda b: (200, message('{"not": "the schema"}')), []))
+    assert llm.parse(IntentAssessment, system="s", user="u", effort="low") is None
+
+
+def test_fallback_response_uses_final_answer_block():
+    content = [
+        {"type": "text", "text": '{"intent_type": "expl'},
+        {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": "claude-opus-4-8"}, "trigger": {"type": "refusal"}},
+        {"type": "text", "text": json.dumps(ASSESSMENT)},
+    ]
+    payload = {**message(None), "content": content}
+    llm = LLM(LLMConfig(), client=mock_client(lambda b: (200, payload), []))
+    assert llm.parse(IntentAssessment, system="s", user="u", effort="low").business_name == "Acme Fitness"
 
 
 class FakeStreamClient:

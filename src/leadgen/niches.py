@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from leadgen.config import Config
 from leadgen.dates import utcnow
-from leadgen.llm import LLM
+from leadgen.llm import LLM, LLMTransient
 from leadgen.sources.base import NicheTarget
 from leadgen.store import Store
 
@@ -98,13 +98,17 @@ class NicheResearcher:
         if result is None or not result.text.strip():
             log.warning("niche research returned nothing; continuing with explicit-intent queries only")
             return []
-        report = self.llm.parse(
-            NicheReport,
-            system="Convert this market research report into the requested structure. Keep every niche, "
-            "query and subreddit exactly as written; do not add new ones.",
-            user=result.text,
-            effort=self.cfg.llm.extract_effort,
-        )
+        try:
+            report = self.llm.parse(
+                NicheReport,
+                system="Convert this market research report into the requested structure. Keep every niche, "
+                "query and subreddit exactly as written; do not add new ones.",
+                user=result.text,
+                effort=self.cfg.llm.extract_effort,
+            )
+        except LLMTransient as exc:
+            log.warning("could not structure niche research right now (%s); will retry next run", exc)
+            return []
         if report is None:
             return []
         return [to_target(s) for s in report.niches[: self.cfg.niches.max_niches]]

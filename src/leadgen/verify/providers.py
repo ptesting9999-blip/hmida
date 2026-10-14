@@ -23,6 +23,10 @@ class ProviderVerdict:
     status: VerificationStatus
     detail: str
     inactive_days: Optional[int] = None
+    # The API call itself failed (network, auth, credits): no judgement was made.
+    failed: bool = False
+    # The provider says the whole domain is catch-all: every other guess there will be too.
+    catch_all: bool = False
 
 
 class VerificationProvider(Protocol):
@@ -72,12 +76,12 @@ class ZeroBounce:
                 self.VALIDATE_URL, params={"api_key": self.api_key, "email": email, "ip_address": ""}
             )
         except (requests.RequestException, ValueError) as exc:
-            return ProviderVerdict("unknown", f"zerobounce request failed: {exc}")
+            return ProviderVerdict("unknown", f"zerobounce request failed: {exc}", failed=True)
         if data.get("error"):
-            return ProviderVerdict("unknown", f"zerobounce error: {data['error']}")
+            return ProviderVerdict("unknown", f"zerobounce error: {data['error']}", failed=True)
         raw = str(data.get("status", "unknown")).lower()
         sub = data.get("sub_status") or ""
-        verdict = ProviderVerdict(self._STATUS.get(raw, "unknown"), f"{raw}{'/' + sub if sub else ''}")
+        verdict = ProviderVerdict(self._STATUS.get(raw, "unknown"), f"{raw}{'/' + sub if sub else ''}", catch_all=raw == "catch-all")
         if verdict.status == "deliverable" and self.check_activity:
             try:
                 activity = self.http.get_json(self.ACTIVITY_URL, params={"api_key": self.api_key, "email": email})
@@ -107,11 +111,11 @@ class NeverBounce:
         try:
             data = self.http.get_json(self.URL, params={"key": self.api_key, "email": email, "timeout": 10})
         except (requests.RequestException, ValueError) as exc:
-            return ProviderVerdict("unknown", f"neverbounce request failed: {exc}")
+            return ProviderVerdict("unknown", f"neverbounce request failed: {exc}", failed=True)
         if data.get("status") != "success":
-            return ProviderVerdict("unknown", f"neverbounce error: {data.get('message') or data.get('status')}")
+            return ProviderVerdict("unknown", f"neverbounce error: {data.get('message') or data.get('status')}", failed=True)
         raw = str(data.get("result", "unknown")).lower()
-        return ProviderVerdict(self._RESULT.get(raw, "unknown"), raw)
+        return ProviderVerdict(self._RESULT.get(raw, "unknown"), raw, catch_all=raw == "catchall")
 
 
 class MillionVerifier:
@@ -134,11 +138,11 @@ class MillionVerifier:
         try:
             data = self.http.get_json(self.URL, params={"api": self.api_key, "email": email, "timeout": 10})
         except (requests.RequestException, ValueError) as exc:
-            return ProviderVerdict("unknown", f"millionverifier request failed: {exc}")
+            return ProviderVerdict("unknown", f"millionverifier request failed: {exc}", failed=True)
         if data.get("error"):
-            return ProviderVerdict("unknown", f"millionverifier error: {data['error']}")
+            return ProviderVerdict("unknown", f"millionverifier error: {data['error']}", failed=True)
         raw = str(data.get("result", "unknown")).lower()
         status = self._RESULT.get(raw, "unknown")
         if status == "deliverable" and str(data.get("quality", "")).lower() == "bad":
             status = "risky"
-        return ProviderVerdict(status, f"{raw}/{data.get('subresult', '')}".rstrip("/"))
+        return ProviderVerdict(status, f"{raw}/{data.get('subresult', '')}".rstrip("/"), catch_all=raw == "catch_all")

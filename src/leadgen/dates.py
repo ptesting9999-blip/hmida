@@ -21,7 +21,7 @@ X_EPOCH_MS = 1288834974657
 _LINKEDIN_MIN = datetime(2014, 1, 1, tzinfo=UTC)
 
 _LINKEDIN_ID_RE = re.compile(r"(?:activity|ugcPost|share)[-:](\d{18,20})", re.IGNORECASE)
-_X_ID_RE = re.compile(r"(?:twitter\.com|x\.com)/[^/]+/status(?:es)?/(\d{10,20})", re.IGNORECASE)
+_X_ID_RE = re.compile(r"(?:twitter\.com|x\.com)/(?:i/web|[^/]+)/status(?:es)?/(\d{10,20})", re.IGNORECASE)
 
 
 def utcnow() -> datetime:
@@ -50,6 +50,10 @@ class Window:
             return False
         dt = ensure_utc(dt)
         return self.start <= dt <= self.end
+
+    def contains_range(self, earliest: Optional[datetime], latest: Optional[datetime]) -> bool:
+        """True only if every instant a loose date could mean lies inside the window."""
+        return self.contains(earliest) and self.contains(latest)
 
     def describe(self) -> str:
         return f"{self.start.date().isoformat()} to {self.end.date().isoformat()}"
@@ -169,6 +173,43 @@ def parse_absolute(text: str) -> Optional[datetime]:
         except ValueError:
             continue
     return None
+
+
+_COARSE_UNITS = {"day", "week", "month", "year"}
+
+
+def date_bounds(text: Optional[str], now: Optional[datetime] = None) -> Optional[tuple[datetime, datetime]]:
+    """(earliest, latest) instant a loose date string can mean.
+
+    "2 weeks ago" is 14-20.99 days old, "Oct 5, 2026" is any time that day, "3 hours ago" and
+    full timestamps are taken as exact. Used so a strict window rejects anything that might
+    fall outside it.
+    """
+    if not text:
+        return None
+    now = ensure_utc(now or utcnow())
+    t = text.strip().lower()
+    if t in ("just now", "now", "today"):
+        return now - timedelta(days=1), now
+    if t == "yesterday":
+        return now - timedelta(days=2), now
+    m = _RELATIVE_RE.match(t)
+    if m:
+        qty_raw, unit_raw = m.group(1), m.group(2).lower()
+        qty = 1 if qty_raw in ("a", "an", "one") else int(qty_raw)
+        unit = _UNIT_ALIASES.get(unit_raw)
+        if unit is None:
+            return None
+        step = timedelta(seconds=_UNIT_SECONDS[unit])
+        latest = now - qty * step
+        earliest = latest - step + timedelta(seconds=1) if unit in _COARSE_UNITS else latest
+        return earliest, latest
+    dt = parse_absolute(text)
+    if dt is None:
+        return None
+    if ":" not in text:  # date only: the post could be from any time that day
+        return dt, dt + timedelta(days=1) - timedelta(seconds=1)
+    return dt, dt
 
 
 def parse_date(text: Optional[str], now: Optional[datetime] = None) -> Optional[datetime]:

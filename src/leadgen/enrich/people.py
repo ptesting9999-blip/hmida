@@ -10,24 +10,33 @@ from pydantic import BaseModel, Field
 from leadgen.llm import LLM
 from leadgen.models import Person
 
-# (pattern, weight). The highest matching weight wins; 0 means "not a decision-maker".
+# Titles that are never the buyer, even when they contain a ranked word ("Product Owner",
+# "Vice President of Engineering", "Marketing Assistant").
+EXCLUDED_TITLES = re.compile(
+    r"\b(assistant|intern|coordinator|receptionist|support|associate|trainee|volunteer|apprentice|"
+    r"(product|process|project|account|data|content|channel) owner|engineer(ing)?|developer|designer|"
+    r"vice[ -]president(?!,? (of )?(marketing|growth|brand))|vp\b(?!,? (of )?(marketing|growth|brand)))",
+    re.I,
+)
+# (pattern, weight). The highest matching weight wins.
 _TITLE_WEIGHTS: list[tuple[re.Pattern[str], float]] = [
-    (re.compile(r"\b(assistant|intern|coordinator|receptionist|support|associate|trainee|volunteer|apprentice)\b", re.I), 0.0),
     (re.compile(r"\b(co-?owner|owner|proprietor|co-?founder|founder|founding partner)\b", re.I), 1.0),
-    (re.compile(r"\b(ceo|chief executive|president|managing director|managing partner|principal)\b", re.I), 0.95),
-    (re.compile(r"\b(cmo|chief marketing|head of (marketing|growth|brand)|(marketing|growth|brand) director|director of (marketing|growth)|vp,? (of )?marketing)\b", re.I), 0.9),
-    (re.compile(r"\b(coo|chief operating|general manager|partner|director)\b", re.I), 0.8),
+    (re.compile(r"\b(ceo|chief executive|(?<!vice )(?<!vice-)president|managing director|managing partner)\b|^principal$|\bprincipal (owner|partner)\b", re.I), 0.95),
+    (re.compile(r"\b(cmo|chief marketing|head of (marketing|growth|brand)|(marketing|growth|brand) director|director of (marketing|growth)|(vp|vice[ -]president),? (of )?(marketing|growth|brand))\b", re.I), 0.9),
+    (re.compile(r"\b(coo|chief operating|general manager|director of operations|operations director|(studio|clinic|practice|salon|spa|gym) (director|manager))\b|^(partner|director)$", re.I), 0.8),
     (re.compile(r"\b(marketing manager|brand manager|growth (manager|lead)|marketing lead)\b", re.I), 0.65),
 ]
 MIN_DECISION_WEIGHT = 0.65
 
 
+def is_excluded_title(title: Optional[str]) -> bool:
+    return bool(title) and bool(EXCLUDED_TITLES.search(title or ""))
+
+
 def title_weight(title: Optional[str]) -> float:
-    if not title:
+    if not title or is_excluded_title(title):
         return 0.0
-    if _TITLE_WEIGHTS[0][0].search(title):
-        return 0.0
-    return max((w for pat, w in _TITLE_WEIGHTS[1:] if pat.search(title)), default=0.0)
+    return max((w for pat, w in _TITLE_WEIGHTS if pat.search(title.strip())), default=0.0)
 
 
 def is_decision_maker(person: Person) -> bool:
@@ -91,6 +100,7 @@ EXTRACT_SYSTEM = (
 
 
 def llm_people(llm: LLM, business: str, text: str, effort: str) -> list[Person]:
+    """People named in the website text. Raises LLMTransient if Claude is temporarily unavailable."""
     if not text.strip():
         return []
     result = llm.parse(
@@ -104,7 +114,8 @@ def llm_people(llm: LLM, business: str, text: str, effort: str) -> list[Person]:
     lowered = text.lower()
     people = []
     for p in result.people:
-        # Guard against invented names: the name must literally appear in what we sent.
+        # Guard against invented data: the name and any email must literally appear in what we sent.
         if p.name and p.name.lower() in lowered:
-            people.append(Person(name=p.name.strip(), role=p.title, email=(p.email or "").lower() or None, source="website"))
+            email = (p.email or "").strip().lower()
+            people.append(Person(name=p.name.strip(), role=p.title, email=email if email and email in lowered else None, source="website"))
     return people

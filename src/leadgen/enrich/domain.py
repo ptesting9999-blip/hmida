@@ -36,6 +36,16 @@ _STOPWORDS = {
     "the", "and", "of", "co", "llc", "inc", "ltd", "limited", "company", "corp", "group", "studio",
     "studios", "official", "shop", "store", "club", "llp", "plc", "gmbh", "&",
 }
+# Industry words shared by thousands of businesses: "Acme Fitness" must not match anytimefitness.com.
+_GENERIC_WORDS = {
+    "fitness", "fit", "gym", "gyms", "yoga", "pilates", "crossfit", "training", "spa", "salon", "beauty",
+    "nails", "hair", "barber", "barbershop", "cafe", "coffee", "bakery", "restaurant", "kitchen", "grill",
+    "pizza", "bistro", "bar", "clinic", "dental", "dentistry", "med", "medical", "health", "wellness",
+    "boutique", "center", "centre", "services", "solutions", "agency", "consulting", "marketing", "media",
+    "design", "realty", "homes", "law", "legal", "auto", "motors", "cleaning", "construction", "room",
+}
+# Service subdomains that rarely carry mail: shop.acme.com -> acme.com.
+_SERVICE_LABELS = {"shop", "store", "book", "booking", "bookings", "app", "my", "members", "portal", "blog", "go", "order", "menu"}
 
 
 def is_business_domain(domain: str) -> bool:
@@ -54,6 +64,9 @@ def normalize_domain(website: Optional[str]) -> Optional[str]:
     domain = host_of(website)
     if not domain or not _DOMAIN_RE.match(domain):
         return None
+    labels = domain.split(".")
+    if len(labels) >= 3 and labels[0] in _SERVICE_LABELS:
+        domain = ".".join(labels[1:])
     return domain if is_business_domain(domain) else None
 
 
@@ -62,19 +75,26 @@ def _tokens(text: str) -> list[str]:
 
 
 def name_matches(business_name: str, domain: str, title: str = "") -> bool:
-    """Does this domain plausibly belong to the named business?"""
+    """Does this domain plausibly belong to the named business?
+
+    The business's most distinctive word must be in the domain: "Acme Fitness" matches
+    acmefitness.com and acme-fit.co.uk, never anytimefitness.com.
+    """
     tokens = _tokens(business_name)
-    if not tokens:
-        return False
+    distinctive = [t for t in tokens if t not in _GENERIC_WORDS]
+    if not distinctive:
+        return False  # "Fit Club": nothing to tell this business apart from any other
     label = domain.split(".")[0].replace("-", "")
+    if distinctive[0] not in label:
+        return False
     compact = "".join(tokens)
     if compact in label or (len(label) >= 5 and label in compact):
         return True
-    in_label = sum(1 for t in tokens if t in label)
-    if in_label >= max(1, (len(tokens) + 1) // 2):
+    in_label = sum(1 for t in distinctive if t in label)
+    if in_label >= max(1, (len(distinctive) + 1) // 2):
         return True
     title_tokens = set(_tokens(title))
-    return bool(title_tokens) and all(t in title_tokens for t in tokens) and in_label >= 1
+    return bool(title_tokens) and all(t in title_tokens for t in tokens)
 
 
 def resolve_domain(business_name: str, location: Optional[str], backend: object) -> Optional[str]:

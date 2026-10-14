@@ -94,7 +94,7 @@ class FakeBackend:
         self.hits = hits
         self.queries = []
 
-    def search(self, query, window, limit):
+    def search(self, query, window, limit, niche=None):
         self.queries.append(query)
         return self.hits
 

@@ -21,7 +21,15 @@ log = logging.getLogger(__name__)
 
 RcptOutcome = Literal["accepted", "rejected", "full", "temp", "blocked", "error"]
 
-_ENHANCED_RE = re.compile(r"\b([245])\.(\d{1,3})\.(\d{1,3})\b")
+# Enhanced status codes (RFC 3463) start a reply line. Matching anywhere would read client IPs
+# ("[5.1.22.33] blocked") or RFC section numbers as mailbox errors.
+_ENHANCED_RE = re.compile(r"^\s*([245])\.(\d{1,3})\.(\d{1,3})\b", re.MULTILINE)
+# Replies about OUR sender address (sender verification, unknown sender domain). They say
+# nothing about the recipient mailbox, so they must never count as "mailbox does not exist".
+_SENDER_RE = re.compile(
+    r"sender address|sender verify|sender domain|sender rejected|^\s*5\.1\.[78]\b|^\s*5\.7\.27\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _BLOCK_WORDS = re.compile(
     r"spamhaus|blocked|block list|blocklist|blacklist|black list|listed|reputation|policy|rbl|dnsbl|"
     r"not permitted|relay|spf|dmarc|authenticat|reverse dns|ptr record|helo|too many|rate limit|"
@@ -60,7 +68,8 @@ def _decode(message: bytes | str) -> str:
 
 
 def classify_rcpt(code: int, message: bytes | str) -> RcptOutcome:
-    text = " ".join(_decode(message).split())
+    raw = _decode(message)
+    text = " ".join(raw.split())
     if code in (250, 251):
         return "accepted"
     if code == 252 or 400 <= code < 500:
@@ -69,8 +78,10 @@ def classify_rcpt(code: int, message: bytes | str) -> RcptOutcome:
         return "full"
     if not 500 <= code < 600:
         return "error"
-    enhanced = _ENHANCED_RE.search(text)
-    if enhanced:
+    if _SENDER_RE.search(raw):
+        return "blocked"
+    enhanced = _ENHANCED_RE.search(raw)
+    if enhanced and enhanced.group(1) == str(code)[0]:
         _, subject, detail = enhanced.groups()
         if subject == "2" and detail == "2":
             return "full"
@@ -138,29 +149,43 @@ class SmtpProber:
         try:
             smtp.connect(host, self.port)
             code, msg = smtp.ehlo(self.helo_host)
-            if code != 250:
+            if code != 250 and not 400 <= code < 500:
                 code, msg = smtp.helo(self.helo_host)
+            if 400 <= code < 500:
+                return self._all(host, emails, "temp", code, f"HELO deferred: {_decode(msg)}")
             if code != 250:
                 return self._all(host, emails, "blocked", code, f"HELO rejected: {_decode(msg)}")
             code, msg = smtp.mail(self.mail_from)
+            if 400 <= code < 500:
+                return self._all(host, emails, "temp", code, f"MAIL FROM deferred: {_decode(msg)}")
             if code != 250:
                 return self._all(host, emails, "blocked", code, f"MAIL FROM rejected: {_decode(msg)}")
 
             results: dict[str, RcptResult] = {}
+            closed = False
             for email in emails:
-                code, msg = smtp.rcpt(email)
+                try:
+                    code, msg = smtp.rcpt(email)
+                except smtplib.SMTPServerDisconnected:
+                    closed = True
+                    break
                 results[email] = RcptResult(classify_rcpt(code, msg), code, _decode(msg))
                 if code == 421:  # server is closing the connection
+                    closed = True
                     break
+            # Addresses we never got to ask about: "try again later", so they stay retryable.
             for email in emails:
-                results.setdefault(email, RcptResult("error", 421, "connection closed by server"))
+                results.setdefault(email, RcptResult("temp", 421, "connection closed by server before this address"))
 
             catch_all: Optional[bool] = None
             outcome: Optional[RcptOutcome] = None
-            if results and any(r.code != 421 for r in results.values()):
-                code, msg = smtp.rcpt(self.nonexistent_address(domain))
-                outcome = classify_rcpt(code, msg)
-                catch_all = True if outcome == "accepted" else False if outcome == "rejected" else None
+            if results and not closed:
+                try:
+                    code, msg = smtp.rcpt(self.nonexistent_address(domain))
+                    outcome = classify_rcpt(code, msg)
+                    catch_all = True if outcome == "accepted" else False if outcome == "rejected" else None
+                except smtplib.SMTPServerDisconnected:
+                    outcome = "temp"
             return SmtpProbe(host=host, catch_all=catch_all, results=results, catch_all_outcome=outcome)
         finally:
             try:

@@ -114,7 +114,7 @@ def make_agent(tmp_path, posts, by_url, mailboxes=("sarah@acmefit.com",)):
     return agent, llm
 
 
-def li_post(url, days_ago, text="We just opened Acme Fitness and need a social media manager to run our Instagram and Meta ads."):
+def li_post(url, days_ago, text="We just opened Acme Fitness (acmefit.com) and need a social media manager to run our Instagram and Meta ads."):
     return RawPost(
         source="fake",
         platform="linkedin",
@@ -133,7 +133,7 @@ def test_end_to_end(tmp_path):
     undated.posted_at = None
     seller = li_post("https://www.linkedin.com/posts/y_seller-activity-4", 2, text="I help brands grow on Instagram. DM me for rates on social media management.")
     agency = li_post("https://www.linkedin.com/posts/z_agency-activity-5", 2)
-    catch_all = li_post("https://www.linkedin.com/posts/w_catch-activity-6", 4)
+    catch_all = li_post("https://www.linkedin.com/posts/w_catch-activity-6", 4, text="Tom Fox here: Catch All Co (catchall.com) needs a social media manager for Instagram ads.")
 
     agent, llm = make_agent(
         tmp_path,

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Section(BaseModel):
@@ -23,7 +23,8 @@ class AgencyConfig(_Section):
             "content creation for social media",
         ]
     )
-    # Free-text locations used to bias searches and niche research. Empty = worldwide.
+    # Where your clients are. Steers niche research, and Claude rejects businesses whose stated
+    # location is clearly outside these (unknown locations still pass). Empty = anywhere.
     target_locations: list[str] = Field(default_factory=list)
     # Short description of the ideal client, given to Claude when judging leads.
     ideal_client: str = (
@@ -33,10 +34,10 @@ class AgencyConfig(_Section):
 
 
 class WindowConfig(_Section):
-    """Only posts whose age is within [min_age_days, max_age_days] are kept."""
+    """Only posts whose age is within [min_age_days, max_age_days] are kept (default: 2-14 days)."""
 
     max_age_days: int = Field(default=14, ge=1, le=60)
-    min_age_days: int = Field(default=0, ge=0)
+    min_age_days: int = Field(default=2, ge=0)
 
     @model_validator(mode="after")
     def _check(self) -> "WindowConfig":
@@ -64,6 +65,16 @@ class SearchSourceConfig(_Section):
     results_per_query: int = Field(default=20, ge=1, le=100)
     # Extra raw search queries (site: operators allowed) run in addition to the built-ins.
     extra_queries: list[str] = Field(default_factory=list)
+
+    @field_validator("platforms")
+    @classmethod
+    def _known_platforms(cls, value: list[str]) -> list[str]:
+        from leadgen.queries import PLATFORM_FILTERS
+
+        unknown = [p for p in value if p not in PLATFORM_FILTERS]
+        if unknown:
+            raise ValueError(f"unknown platform(s) {unknown}; choose from {sorted(PLATFORM_FILTERS)}")
+        return value
 
 
 class RedditSourceConfig(_Section):
@@ -162,6 +173,8 @@ class LLMConfig(_Section):
     research_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     # Server-side refusal fallback (Claude API only). Ignored for Haiku models.
     server_side_fallback: bool = True
+    # Web searches Claude may run per research call: niche research, and post discovery when
+    # no Brave/Serper key is set. Lower it to cut cost.
     max_web_searches: int = Field(default=8, ge=1, le=30)
 
 

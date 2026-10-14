@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS seen_posts (
     key TEXT PRIMARY KEY,
     url TEXT NOT NULL,
     outcome TEXT NOT NULL,
-    seen_at TEXT NOT NULL
+    seen_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS verifications (
     email TEXT PRIMARY KEY,
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS leads (
     row TEXT NOT NULL,
     created_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    verified_at TEXT
+    verified_at TEXT,
+    exported_at TEXT
 );
 CREATE INDEX IF NOT EXISTS leads_domain ON leads(domain);
 CREATE TABLE IF NOT EXISTS niches (
@@ -61,6 +63,13 @@ class Store:
         if "verified_at" not in cols:
             self._conn.execute("ALTER TABLE leads ADD COLUMN verified_at TEXT")
             self._conn.execute("UPDATE leads SET verified_at = created_at")
+        if "exported_at" not in cols:
+            # Leads from before the outbox existed were already written out by their run.
+            self._conn.execute("ALTER TABLE leads ADD COLUMN exported_at TEXT")
+            self._conn.execute("UPDATE leads SET exported_at = created_at")
+        seen_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(seen_posts)")}
+        if "attempts" not in seen_cols:
+            self._conn.execute("ALTER TABLE seen_posts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
 
     def close(self) -> None:
@@ -75,14 +84,28 @@ class Store:
 
     # -- posts -------------------------------------------------------------------------
 
-    def is_seen(self, key: str) -> bool:
-        return bool(self._exec("SELECT 1 FROM seen_posts WHERE key = ?", (key,)))
+    def is_seen(self, key: str, max_attempts: int = 3) -> bool:
+        """Processed for good. Posts parked for retry count as seen once they used up their attempts."""
+        rows = self._exec("SELECT outcome, attempts FROM seen_posts WHERE key = ?", (key,))
+        if not rows:
+            return False
+        outcome, attempts = rows[0]
+        return outcome != "retry" or attempts >= max_attempts
 
     def mark_seen(self, key: str, url: str, outcome: str) -> None:
         self._exec(
-            "INSERT OR REPLACE INTO seen_posts(key, url, outcome, seen_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO seen_posts(key, url, outcome, seen_at, attempts) VALUES (?, ?, ?, ?, 0)",
             (key, url, outcome, utcnow().isoformat()),
         )
+
+    def mark_retry(self, key: str, url: str) -> int:
+        """A temporary failure on our side: try this post again on a later run. Returns attempts so far."""
+        self._exec(
+            "INSERT INTO seen_posts(key, url, outcome, seen_at, attempts) VALUES (?, ?, 'retry', ?, 1) "
+            "ON CONFLICT(key) DO UPDATE SET attempts = attempts + 1, seen_at = excluded.seen_at, outcome = 'retry'",
+            (key, url, utcnow().isoformat()),
+        )
+        return int(self._exec("SELECT attempts FROM seen_posts WHERE key = ?", (key,))[0][0])
 
     # -- verifications -----------------------------------------------------------------
 
@@ -128,6 +151,16 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, 'active', ?)",
             (lead.email.lower(), domain.lower(), lead.intent_url, json.dumps(lead.as_row()), now, now),
         )
+
+    def unexported_leads(self) -> list[dict[str, Any]]:
+        """The outbox: saved leads not yet written to a CSV/JSON/webhook (e.g. after a crash)."""
+        rows = self._exec("SELECT row FROM leads WHERE exported_at IS NULL AND status = 'active' ORDER BY created_at")
+        return [json.loads(r[0]) for r in rows]
+
+    def mark_exported(self, emails: list[str]) -> None:
+        now = utcnow().isoformat()
+        for email in emails:
+            self._exec("UPDATE leads SET exported_at = ? WHERE email = ?", (now, email.lower()))
 
     def all_leads(self, include_inactive: bool = False) -> list[dict[str, Any]]:
         """Delivered leads, oldest first. By default only those whose email is still verified."""

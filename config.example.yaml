@@ -7,14 +7,15 @@ agency:
     - social media management
     - paid ads management (Meta, Instagram, TikTok, Google)
     - content creation for social media
-  target_locations: []          # e.g. ["United States", "London, UK"]; empty = anywhere
+  target_locations: []          # e.g. ["United States", "London, UK"]; empty = anywhere. Claude drops
+                                # businesses clearly elsewhere; niche research focuses on these
   ideal_client: >-
     Small and mid-sized businesses, local businesses, startups and founders who want to
     grow through social media and paid ads.
 
 window:
-  max_age_days: 14              # only posts from the last 14 days...
-  min_age_days: 0               # ...set to 2 to skip anything newer than 2 days
+  max_age_days: 14              # only posts between 2 and 14 days old (your requirement);
+  min_age_days: 2               # set to 0 to also take posts from the last 2 days
 
 intent:
   min_score: 70                 # Claude's 0-100 warmth score for explicit requests
@@ -71,7 +72,7 @@ llm:
   extract_effort: low
   research_effort: high
   server_side_fallback: true
-  max_web_searches: 8
+  max_web_searches: 8           # per Claude research call (niche research / Claude-backed search)
 
 output:
   dir: output

@@ -52,10 +52,22 @@ class EmailVerifier:
             cfg.extra_disposable_domains_file
         )
         self._mx_cache: dict[str, MxResult] = {}
-        self._resolver_healthy: Optional[bool] = None
+        self._resolver_healthy = False
+        self._resolver_warned = False
+        # Domains a verification API reported as catch-all: further guesses there are pointless.
+        self._catch_all_domains: set[str] = set()
         # One SMTP session per domain at a time; mail servers dislike parallel probes.
         self._domain_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._locks_guard = threading.Lock()
+
+    def reset(self) -> None:
+        """Forget per-process DNS / catch-all knowledge. Called at the start of every run so a
+        long-lived agent (run --every) never keeps stale MX data or a one-off DNS failure."""
+        self._mx_cache.clear()
+        self._resolver_healthy = False
+        self._resolver_warned = False
+        self._catch_all_domains.clear()
+        self.suppression.reload()
 
     @property
     def methods(self) -> list[str]:
@@ -136,18 +148,22 @@ class EmailVerifier:
         return None
 
     def _mx(self, domain: str) -> MxResult:
-        if domain not in self._mx_cache:
-            result = self.mx_lookup(domain)
-            if result.status in ("nxdomain", "no_mx") and not self._resolver_ok():
-                # A broken or filtering resolver must not get real domains marked as dead.
-                result = MxResult("error", detail="DNS resolver is not answering reliably (canary lookup failed)")
+        cached = self._mx_cache.get(domain)
+        if cached is not None:
+            return cached
+        result = self.mx_lookup(domain)
+        if result.status in ("nxdomain", "no_mx") and not self._resolver_ok():
+            # A broken or filtering resolver must not get real domains marked as dead.
+            result = MxResult("error", detail="DNS resolver is not answering reliably (canary lookup failed)")
+        if result.status != "error":  # never remember a failure: the next lookup may work
             self._mx_cache[domain] = result
-        return self._mx_cache[domain]
+        return result
 
     def _resolver_ok(self) -> bool:
-        if self._resolver_healthy is None:
+        if not self._resolver_healthy:
             self._resolver_healthy = self.mx_lookup(DNS_CANARY_DOMAIN).status == "ok"
-            if not self._resolver_healthy:
+            if not self._resolver_healthy and not self._resolver_warned:
+                self._resolver_warned = True
                 log.error("DNS resolver failed to find MX records for %s; MX checks are unreliable", DNS_CANARY_DOMAIN)
         return self._resolver_healthy
 
@@ -163,16 +179,22 @@ class EmailVerifier:
 
     def _decide(self, email: str, mx: MxResult, probe: Optional[SmtpProbe]) -> VerificationResult:
         checks = {"syntax": "ok", "role": "personal", "disposable": "no", "mx": mx.status}
-        if mx.status != "ok":
+        if mx.status == "ok":
+            checks["mx"] = f"ok ({mx.hosts[0]})"
+        elif mx.status == "error" and self.provider is not None:
+            # No usable DNS here (e.g. a proxy-only network). The verification API checks MX itself.
+            checks["mx"] = f"not checked locally ({mx.detail}); left to {self.provider.name}"
+        else:
             status: VerificationStatus = "unknown" if mx.status == "error" else "undeliverable"
-            return _result(email, status, mx.detail, checks)
-        checks["mx"] = f"ok ({mx.hosts[0]})"
+            result = _result(email, status, mx.detail, checks)
+            result.transient = mx.status == "error"
+            return result
+
         verdicts: dict[str, VerificationStatus] = {}
         reasons: list[str] = []
-
-        retryable = False
+        retryable = transient = False
         if probe is not None:
-            smtp_status, smtp_reason, retryable = _smtp_verdict(email, probe)
+            smtp_status, smtp_reason, retryable, transient = _smtp_verdict(email, probe)
             accepted_on_catch_all = probe.catch_all is True and smtp_status == "risky" and "catch-all" in smtp_reason
             if accepted_on_catch_all and self.provider is not None and self.cfg.trust_provider_on_catch_all:
                 # SMTP can't tell on a catch-all domain; let the verification API decide alone.
@@ -184,25 +206,29 @@ class EmailVerifier:
                 return _result(email, smtp_status, smtp_reason, checks)
             reasons.append(f"smtp: {smtp_reason}")
 
+        activity = "unknown (needs ZeroBounce activity data)"
         if self.provider is not None:
+            domain = rules.split_email(email)[1]
+            if domain in self._catch_all_domains:
+                checks[self.provider.name] = "catch-all (reported for an earlier address on this domain)"
+                return _result(email, "risky", "catch-all domain: mailbox cannot be confirmed", checks)
             v = self.provider.check(email)
+            if v.catch_all:
+                self._catch_all_domains.add(domain)
             status = v.status
             detail = v.detail
-            if (
-                status == "deliverable"
-                and v.inactive_days is not None
-                and self.cfg.max_inactive_days is not None
-                and v.inactive_days > self.cfg.max_inactive_days
-            ):
-                status = "risky"
-                detail += f"; no activity seen in {v.inactive_days} days (dormant)"
-            elif v.inactive_days is not None:
-                detail += f"; active within {v.inactive_days} days"
+            if v.inactive_days is not None:
+                activity = f"active within {v.inactive_days} days"
+                if self.cfg.max_inactive_days is not None and v.inactive_days > self.cfg.max_inactive_days and status == "deliverable":
+                    status = "risky"
+                    detail += f"; no activity seen in {v.inactive_days} days (dormant)"
             verdicts[self.provider.name] = status
             checks[self.provider.name] = detail
             reasons.append(f"{self.provider.name}: {detail}")
+            transient = transient or v.failed
             if status in ("undeliverable", "risky"):
                 return _result(email, status, detail, checks)
+        checks["activity"] = activity
 
         if not verdicts:
             return _result(email, "unknown", "no mailbox verification method enabled", checks)
@@ -212,34 +238,39 @@ class EmailVerifier:
         else:
             ok = bool(confirmed)
         if ok:
-            return _result(email, "deliverable", f"confirmed by {', '.join(confirmed)}", checks)
+            return _result(email, "deliverable", f"confirmed by {', '.join(confirmed)}; mailbox activity: {activity}", checks)
         result = _result(email, "unknown", "; ".join(reasons) or "could not confirm mailbox", checks)
         result.retryable = retryable
+        result.transient = transient
         return result
 
 
-def _smtp_verdict(email: str, probe: SmtpProbe) -> tuple[VerificationStatus, str, bool]:
-    """(status, reason, retryable) for one address from a domain's SMTP probe."""
+def _smtp_verdict(email: str, probe: SmtpProbe) -> tuple[VerificationStatus, str, bool, bool]:
+    """(status, reason, retryable, transient) for one address from a domain's SMTP probe.
+
+    retryable: the server said "try again later" (greylisting). transient: we never got an
+    answer because of our own connectivity (port 25 unreachable, connection failed).
+    """
     r = probe.results.get(email)
     if r is None:
-        return "unknown", "not probed", False
+        return "unknown", "not probed", False, False
     msg = " ".join(r.message.split())[:160]
     if r.outcome == "accepted":
         if probe.catch_all is True:
-            return "risky", "catch-all domain: server accepts any address, mailbox cannot be confirmed", False
+            return "risky", "catch-all domain: server accepts any address, mailbox cannot be confirmed", False, False
         if probe.catch_all is False:
-            return "deliverable", f"mailbox accepted ({r.code}), random address rejected", False
+            return "deliverable", f"mailbox accepted ({r.code}), random address rejected", False, False
         greylisted = probe.catch_all_outcome == "temp"
-        return "unknown", f"mailbox accepted ({r.code}) but catch-all test was inconclusive", greylisted
+        return "unknown", f"mailbox accepted ({r.code}) but catch-all test was inconclusive", greylisted, False
     if r.outcome == "rejected":
-        return "undeliverable", f"mailbox rejected: {r.code} {msg}", False
+        return "undeliverable", f"mailbox rejected: {r.code} {msg}", False, False
     if r.outcome == "full":
-        return "risky", f"mailbox full / over quota (likely abandoned): {r.code} {msg}", False
+        return "risky", f"mailbox full / over quota (likely abandoned): {r.code} {msg}", False, False
     if r.outcome == "temp":
-        return "unknown", f"temporary failure / greylisting: {r.code} {msg}", True
+        return "unknown", f"temporary failure / greylisting: {r.code} {msg}", True, False
     if r.outcome == "blocked":
-        return "unknown", f"probe blocked by server policy: {r.code} {msg}", False
-    return "unknown", f"SMTP error: {msg}", False
+        return "unknown", f"probe blocked by server policy: {r.code} {msg}", False, False
+    return "unknown", f"SMTP error: {msg}", False, True
 
 
 def _result(email: str, status: VerificationStatus, reason: str, checks: dict[str, str]) -> VerificationResult:

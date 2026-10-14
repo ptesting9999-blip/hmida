@@ -9,12 +9,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from leadgen.config import Config
 from leadgen.dates import Window, utcnow
 from leadgen.enrich import BusinessContext, ContactFinder, ContactPlan
-from leadgen.intent import IntentAssessment, IntentClassifier, prefilter
+from leadgen.enrich.domain import normalize_domain
+from leadgen.intent import IntentAssessment, IntentClassifier, build_user_message, prefilter
 from leadgen.llm import LLMUnavailable
 from leadgen.models import Lead, Person, RawPost, Rejection
 from leadgen.niches import NicheResearcher
@@ -40,6 +41,9 @@ PLATFORM_LABELS = {
 }
 # Don't hand over the same business twice within this many days.
 BUSINESS_COOLDOWN_DAYS = 60
+# A post that failed because of OUR side (Claude/DNS/SMTP/verifier outage) is tried again on later
+# runs, at most this many times in total, so a long outage cannot re-bill it forever.
+MAX_POST_ATTEMPTS = 3
 
 
 @dataclass
@@ -116,8 +120,10 @@ class LeadAgent:
         store: Store,
         writer: OutputWriter,
         niche_researcher: Optional[NicheResearcher] = None,
+        preflight: Optional[Callable[[], None]] = None,
     ) -> None:
         self.cfg = cfg
+        self.preflight = preflight
         self.sources = sources
         self.classifier = classifier
         self.finder = finder
@@ -131,9 +137,18 @@ class LeadAgent:
     # -- run ---------------------------------------------------------------------------
 
     def run(self, limit: Optional[int] = None, now: Optional[datetime] = None) -> RunReport:
+        # Fresh DNS/catch-all knowledge and the latest suppression list for every run.
+        self.verifier.reset()
+        if self.preflight is not None:
+            self.preflight()  # a bad Claude key fails here, before any paid search query runs
         window = Window.from_days(self.cfg.window.max_age_days, self.cfg.window.min_age_days, now=now)
         report = RunReport(started_at=window.now, window=window)
-        report.niches = self.niche_researcher.get() if self.niche_researcher else []
+        try:
+            report.niches = self.niche_researcher.get() if self.niche_researcher else []
+        except LLMUnavailable:
+            raise
+        except Exception:  # niche research is an extra; explicit-intent search still runs
+            log.exception("niche research failed; continuing with explicit-intent queries only")
 
         candidates = self._screen(self._collect(window, report.niches), window, report, limit)
         log.info("%d posts to assess with Claude", len(candidates))
@@ -150,8 +165,13 @@ class LeadAgent:
                 self._record(outcome, report)
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
-            # Even if the run is cut short, hand over the leads found so far.
-            report.files = self.writer.write(report.leads, report.rejections, report.started_at)
+            # Outbox: hand over every saved lead not exported yet - this run's, and any left behind
+            # by an earlier run that was killed before it could write its files.
+            rows = self.store.unexported_leads()
+            report.files = self.writer.write(rows, report.rejections, report.started_at)
+            self.store.mark_exported([r["verified_email"] for r in rows])
+            if len(rows) > len(report.leads):
+                log.info("delivered %d leads saved by an earlier, interrupted run", len(rows) - len(report.leads))
         return report
 
     def _record(self, outcome: PostOutcome, report: RunReport) -> None:
@@ -164,8 +184,12 @@ class LeadAgent:
         report.leads += outcome.leads
         for lead in outcome.leads:
             log.info("LEAD %s <%s> posted %s on %s", lead.business_name, lead.email, lead.posted_at.date(), lead.platform)
-        # Errors stay unseen so the next run retries them.
-        if not (rejection is not None and rejection.stage == "error"):
+        if rejection is not None and rejection.stage in ("error", "retry"):
+            # Our side failed (outage, crash): try the post again later, a bounded number of times.
+            attempts = self.store.mark_retry(post.key, post.url)
+            if attempts >= MAX_POST_ATTEMPTS:
+                log.warning("giving up on %s after %d attempts: %s", post.url, attempts, rejection.reason)
+        else:
             stage = "lead" if outcome.leads else rejection.stage if rejection else "done"
             self.store.mark_seen(post.key, post.url, stage)
 
@@ -208,10 +232,12 @@ class LeadAgent:
             if post.key in keys:
                 continue
             keys.add(post.key)
-            if self.store.is_seen(post.key):
+            if self.store.is_seen(post.key, MAX_POST_ATTEMPTS):
                 report.already_seen += 1
                 continue
-            if not window.contains(post.posted_at):
+            earliest = post.posted_earliest or post.posted_at
+            latest = post.posted_latest or post.posted_at
+            if post.posted_at is None or not window.contains_range(earliest, latest):
                 report.out_of_window += 1
                 reason = "no reliable post date" if post.posted_at is None else f"posted {post.posted_at.date()}"
                 report.rejections.append(Rejection(post.url, post.platform, "date", reason))
@@ -248,21 +274,29 @@ class LeadAgent:
             return PostOutcome(post, rejection=Rejection(post.url, post.platform, "intent", reason, a.business_name or ""), assessment=a)
 
         content_lower = post.content().lower()
+        hint_text = build_user_message(post, include_unverified=False).lower()  # page-sourced text only
+        poster_name = _real_name(a.poster_name)
+        if poster_name and poster_name.lower() not in hint_text:
+            poster_name = None  # not in the post or its metadata: Claude guessed it
         ctx = BusinessContext(
             business_name=a.business_name or post.extra.get("business_name"),
-            website=a.business_website or post.extra.get("website"),
+            website=self._grounded_website(post, a.business_website) or post.extra.get("website"),
             location=a.business_location,
-            poster=Person(name=_real_name(a.poster_name), role=a.poster_role, source="post")
-            if _real_name(a.poster_name)
-            else None,
+            poster=Person(name=poster_name, role=a.poster_role, source="post") if poster_name else None,
             poster_is_decision_maker=a.poster_is_decision_maker,
             # Only addresses that really appear in the post, never model output alone.
             emails_in_post=[e for e in a.emails_in_post if e.lower() in content_lower],
         )
         plan = self.finder.plan(ctx)
         business = ctx.business_name or plan.domain or ""
+        for domain in {plan.domain, normalize_domain(ctx.website)}:
+            if domain and self.verifier.suppression.blocks(domain):
+                # A suppressed client/competitor stays suppressed even if the owner wrote a gmail address.
+                rejection = Rejection(post.url, post.platform, "suppressed", f"{domain} is on the suppression list", business)
+                return PostOutcome(post, rejection=rejection, assessment=a)
         if not plan.decision_makers:
-            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "contacts", "; ".join(plan.notes), business), assessment=a)
+            stage = "retry" if plan.transient else "contacts"
+            return PostOutcome(post, rejection=Rejection(post.url, post.platform, stage, "; ".join(plan.notes), business), assessment=a)
         if plan.domain and self.store.domain_delivered_since(plan.domain, BUSINESS_COOLDOWN_DAYS):
             rejection = Rejection(post.url, post.platform, "duplicate", f"lead for {plan.domain} already delivered", business)
             return PostOutcome(post, rejection=rejection, assessment=a)
@@ -280,7 +314,7 @@ class LeadAgent:
         business = ctx.business_name or plan.domain or ""
         leads: list[Lead] = []
         failures: list[str] = []
-        greylisted = False
+        greylisted = transient = False
         max_contacts = self.cfg.enrichment.max_contacts_per_business
         for dm in plan.decision_makers:
             if len(leads) >= max_contacts:
@@ -292,6 +326,7 @@ class LeadAgent:
             chosen = next((c for c in dm.candidates if results[c.email].deliverable), None)
             if chosen is None:
                 greylisted = greylisted or any(results[c.email].retryable for c in dm.candidates)
+                transient = transient or any(results[c.email].transient for c in dm.candidates)
                 best = dm.candidates[0]
                 failures.append(f"{dm.person.name}: {best.email} {results[best.email].status} ({results[best.email].reason})")
                 continue
@@ -313,7 +348,21 @@ class LeadAgent:
         reason = " | ".join(failures)[:500]
         if greylisted:
             reason = "still greylisted after retry: " + reason
-        return [], Rejection(post.url, post.platform, "verify", reason[:500], business), False
+        # An outage on our side (DNS, port 25, verifier API) decided nothing: try again on a later run.
+        stage = "retry" if transient else "verify"
+        return [], Rejection(post.url, post.platform, stage, reason[:500], business), False
+
+    @staticmethod
+    def _grounded_website(post: RawPost, website: Optional[str]) -> Optional[str]:
+        """Claude's business_website, only if that domain really appears in the post (no guesses)."""
+        domain = normalize_domain(website)
+        if not domain:
+            return None
+        hints = " ".join([post.content(), post.url, str(post.extra.get("website") or "")]).lower()
+        if domain in hints:
+            return website
+        log.debug("ignoring website %s: not in the post, will look the business up instead", website)
+        return None
 
     def _lead(
         self,

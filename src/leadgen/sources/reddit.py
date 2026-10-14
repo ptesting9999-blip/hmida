@@ -24,6 +24,8 @@ _HIRING_RE = re.compile(r"\[\s*hiring\s*\]|\bhiring\b", re.IGNORECASE)
 _FOR_HIRE_RE = re.compile(r"\[\s*for\s*hire\s*\]|\bfor hire\b", re.IGNORECASE)
 # Unauthenticated Reddit allows roughly 10 requests per minute.
 _ANON_DELAY_SECONDS = 6.5
+# Pages of up to 100 results fetched per subreddit while looking back through the window.
+MAX_PAGES = 10
 
 
 def is_hiring_post(title: str, flair: Optional[str]) -> bool:
@@ -64,26 +66,36 @@ class RedditSource:
         return {"Authorization": f"bearer {self._token}"}
 
     def _search(self, subreddit: str, query: str, window: Window) -> list[dict[str, Any]]:
+        """Newest-first search results, paging back until posts are older than the window."""
         headers = self._auth_headers()
         base = "https://oauth.reddit.com" if headers else "https://www.reddit.com"
         suffix = "" if headers else ".json"
         span = window.now - window.start
-        t = "day" if span <= timedelta(days=1) else "week" if span <= timedelta(days=7) else "month"
-        data = self.http.get_json(
-            f"{base}/r/{subreddit}/search{suffix}",
-            params={
+        t = "week" if span <= timedelta(days=7) else "month" if span <= timedelta(days=31) else "year"
+        items: list[dict[str, Any]] = []
+        after: Optional[str] = None
+        for _ in range(MAX_PAGES):
+            params: dict[str, Any] = {
                 "q": query,
                 "restrict_sr": 1,
                 "sort": "new",
                 "t": t,
                 "limit": self.cfg.max_results_per_subreddit,
                 "raw_json": 1,
-            },
-            headers=headers,
-        )
-        if not headers:
-            time.sleep(self.anon_delay)
-        return [c.get("data", {}) for c in (data.get("data") or {}).get("children", [])]
+            }
+            if after:
+                params["after"] = after
+            data = self.http.get_json(f"{base}/r/{subreddit}/search{suffix}", params=params, headers=headers)
+            if not headers:
+                time.sleep(self.anon_delay)
+            listing = data.get("data") or {}
+            page = [c.get("data", {}) for c in listing.get("children", [])]
+            items += page
+            after = listing.get("after")
+            oldest = min((float(d.get("created_utc") or 0) for d in page), default=0.0)
+            if not after or not page or oldest < window.start.timestamp():
+                break
+        return items
 
     def collect(self, window: Window, niches: list[NicheTarget]) -> Iterable[RawPost]:
         jobs: list[tuple[str, Optional[str]]] = [(s, None) for s in self.cfg.subreddits]

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional, Protocol
 
 import requests
@@ -16,9 +16,9 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
 from leadgen.config import SearchSourceConfig
-from leadgen.dates import Window, datetime_from_post_url, parse_date
+from leadgen.dates import Window, date_bounds, datetime_from_post_url, parse_date
 from leadgen.http import HttpClient
-from leadgen.llm import LLM, LLMUnavailable
+from leadgen.llm import LLM, LLMTransient, LLMUnavailable
 from leadgen.models import RawPost, normalize_url
 from leadgen.queries import intent_queries
 from leadgen.sources.base import NicheTarget, author_from_linkedin_url, author_from_title, clean_text, platform_for_url
@@ -32,6 +32,7 @@ class SearchHit:
     title: str
     snippet: str
     date_text: Optional[str] = None
+    extra: dict[str, str] = field(default_factory=dict)
 
 
 class SearchBackend(Protocol):
@@ -39,7 +40,7 @@ class SearchBackend(Protocol):
     # How many intent phrases to OR into one query (see leadgen.queries).
     phrases_per_query: int
 
-    def search(self, query: str, window: Optional[Window], limit: int) -> list[SearchHit]: ...
+    def search(self, query: str, window: Optional[Window], limit: int, niche: Optional[str] = None) -> list[SearchHit]: ...
 
 
 def _strip_html(text: str) -> str:
@@ -60,11 +61,11 @@ class BraveSearch:
         self.api_key = api_key
         self.http = http
 
-    def search(self, query: str, window: Optional[Window], limit: int) -> list[SearchHit]:
+    def search(self, query: str, window: Optional[Window], limit: int, niche: Optional[str] = None) -> list[SearchHit]:
         hits: list[SearchHit] = []
-        offset = 0
+        offset = 0  # Brave's offset is a page index, so the page size must stay fixed
         while len(hits) < limit and offset < 10:
-            params = {"q": query, "count": min(self.PAGE_SIZE, limit - len(hits)), "offset": offset}
+            params = {"q": query, "count": self.PAGE_SIZE, "offset": offset}
             if window is not None:
                 params["freshness"] = f"{window.start.date().isoformat()}to{window.end.date().isoformat()}"
             data = self.http.get_json(
@@ -83,7 +84,8 @@ class BraveSearch:
                         date_text=r.get("page_age") or r.get("age"),
                     )
                 )
-            if len(results) < params["count"]:
+            more = ((data.get("query") or {}).get("more_results_available"))
+            if len(results) < self.PAGE_SIZE or more is False:
                 break
             offset += 1
         return hits[:limit]
@@ -101,10 +103,11 @@ class SerperSearch:
         self.api_key = api_key
         self.http = http
 
-    def search(self, query: str, window: Optional[Window], limit: int) -> list[SearchHit]:
+    def search(self, query: str, window: Optional[Window], limit: int, niche: Optional[str] = None) -> list[SearchHit]:
         hits: list[SearchHit] = []
         page = 1
-        while len(hits) < limit and page <= 5:
+        max_pages = min(10, -(-limit // self.PAGE_SIZE))
+        while len(hits) < limit and page <= max_pages:
             body: dict[str, object] = {"q": query, "num": self.PAGE_SIZE, "page": page}
             if window is not None:
                 s, e = window.start, window.end
@@ -152,9 +155,17 @@ class ClaudeWebSearch:
         self.llm = llm
         self.max_searches = max_searches
 
-    def search(self, query: str, window: Optional[Window], limit: int) -> list[SearchHit]:
+    def search(self, query: str, window: Optional[Window], limit: int, niche: Optional[str] = None) -> list[SearchHit]:
         if window is None:
             user = f"Search the web for: {query}\nThen list the most relevant result URLs."
+        elif niche:
+            user = (
+                f"Search the web for this (split it into several shorter searches as you see fit): {query}\n\n"
+                f"Find individual public posts published between {window.describe()} by a specific business in "
+                f"the niche '{niche}' announcing an opening, launch, expansion, rebrand or funding round. For each "
+                "post report its exact URL, the business or author name, and a verbatim quote of the post text. "
+                f"Report at most {limit} posts. Ignore articles, listicles and agencies advertising themselves."
+            )
         else:
             user = (
                 f"Search the web for this (split it into several shorter searches as you see fit): {query}\n\n"
@@ -171,28 +182,46 @@ class ClaudeWebSearch:
         by_url = {normalize_url(h.url): h for h in result.hits}
         if window is None:
             return [SearchHit(url=h.url, title=h.title, snippet="", date_text=h.page_age) for h in result.hits][:limit]
-        found = self.llm.parse(
-            _FoundPosts,
-            system="Extract the posts listed in this research report. Copy URLs exactly.",
-            user=result.text,
-            effort="low",
-        )
+        try:
+            found = self.llm.parse(
+                _FoundPosts,
+                system="Extract the posts listed in this research report. Copy URLs exactly.",
+                user=result.text,
+                effort="low",
+            )
+        except LLMTransient as exc:
+            log.warning("could not structure Claude search results right now: %s", exc)
+            return []
         hits: list[SearchHit] = []
         for p in found.posts if found else []:
             hit = by_url.get(normalize_url(p.url))
             if hit is None:  # the model reported a URL that no search returned - discard
                 continue
-            title = f"{p.author} on {platform_for_url(hit.url).capitalize()}: {hit.title}" if p.author else hit.title
-            hits.append(SearchHit(url=hit.url, title=title, snippet=p.quote, date_text=hit.page_age))
+            # Post text = what the search server itself quoted from the page. The model's own
+            # quote/author are kept only as unverified hints, so nothing it wrote (e.g. an email
+            # address) can pass as part of the real post.
+            hits.append(
+                SearchHit(
+                    url=hit.url,
+                    title=hit.title,
+                    snippet=" ".join(hit.cited),
+                    date_text=hit.page_age,
+                    extra={"reported_quote": p.quote, "reported_author": p.author or ""},
+                )
+            )
         return hits[:limit]
 
 
 # Only URLs that point at a single post / listing, not profiles, hashtags or search pages.
 _POST_URL_RES = {
     "linkedin": re.compile(r"linkedin\.com/(posts/|feed/update/)", re.I),
-    "instagram": re.compile(r"instagram\.com/(p|reel|reels|tv)/", re.I),
-    "facebook": re.compile(r"facebook\.com/.+/(posts|permalink|videos)/|facebook\.com/(groups/[^/]+/(posts|permalink)/|permalink\.php|story\.php)", re.I),
-    "x": re.compile(r"(x|twitter)\.com/[^/]+/status/", re.I),
+    "instagram": re.compile(r"instagram\.com/(?:[A-Za-z0-9._]+/)?(?:p|reels?|tv)/(?!audio/)[A-Za-z0-9_-]+", re.I),
+    "facebook": re.compile(
+        r"(?:facebook|fb)\.com/(?:[^/?]+/(?:posts|videos|photos)/[^/?]+|groups/[^/]+/(?:posts|permalink)/\d+|"
+        r"share/[pvr]/|reel/\d+|photo(?:\.php)?/?\?fbid=|permalink\.php|story\.php)",
+        re.I,
+    ),
+    "x": re.compile(r"(x|twitter)\.com/(?:i/web|[^/]+)/status/", re.I),
     "threads": re.compile(r"threads\.(net|com)/@[^/]+/post/", re.I),
     "reddit": re.compile(r"reddit\.com/r/[^/]+/comments/", re.I),
 }
@@ -221,7 +250,7 @@ class SearchSource:
     def collect(self, window: Window, niches: list[NicheTarget]) -> Iterable[RawPost]:
         for query, niche in self.queries(niches):
             try:
-                hits = self.backend.search(query, window, self.cfg.results_per_query)
+                hits = self.backend.search(query, window, self.cfg.results_per_query, niche=niche)
             except (requests.RequestException, ValueError) as exc:
                 log.warning("%s query failed (%s): %s", self.name, exc, query)
                 continue
@@ -241,9 +270,11 @@ class SearchSource:
             return None
         posted_at = datetime_from_post_url(hit.url)
         date_source = "post_id" if posted_at else None
+        earliest = latest = None
         if posted_at is None:
             posted_at = parse_date(hit.date_text, window.now)
             date_source = "search_index" if posted_at else None
+            earliest, latest = date_bounds(hit.date_text, window.now) or (None, None)
         author = author_from_title(hit.title)
         if author is None and platform == "linkedin":
             author = author_from_linkedin_url(hit.url)
@@ -256,6 +287,9 @@ class SearchSource:
             author=author,
             posted_at=posted_at,
             date_source=date_source,
+            posted_earliest=earliest,
+            posted_latest=latest,
             query=query,
             niche=niche,
+            extra=dict(hit.extra),
         )

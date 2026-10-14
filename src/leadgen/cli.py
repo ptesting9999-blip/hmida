@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -24,6 +26,9 @@ log = logging.getLogger("leadgen")
 
 
 def _config(path: Optional[str]) -> Config:
+    if path is None and Path("config.yaml").is_dir():
+        raise SetupError("./config.yaml is a folder, not a file (Docker creates one when the file is missing): "
+                         "remove it and copy config.example.yaml to config.yaml")
     if path is None and Path("config.yaml").is_file():
         path = "config.yaml"
     return load_config(path)
@@ -43,8 +48,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 0
         try:
             print(agent.run(limit=args.limit).summary(), flush=True)
-        except LLMUnavailable:
-            raise  # bad key: retrying every few hours won't fix it
+        except LLMUnavailable as exc:
+            # Stay up and try again next cycle: exiting would make Docker restart us in a tight
+            # loop. The preflight check fails before any paid search runs, so this costs nothing.
+            log.error("Claude unavailable (%s) - fix ANTHROPIC_API_KEY; retrying next cycle", exc)
         except Exception:
             # Network blips etc. must not stop an unattended agent; try again next cycle.
             log.exception("run failed; retrying at the next scheduled run")
@@ -94,6 +101,8 @@ def cmd_suppress(args: argparse.Namespace) -> int:
 def cmd_export(args: argparse.Namespace) -> int:
     cfg = _config(args.config)
     rows = Store(cfg.db_path).all_leads(include_inactive=args.all)
+    if not args.all:
+        rows = Suppression(cfg.suppression_file).filter_rows(rows)  # opt-outs never leave the building
     out = Path(args.out or f"{cfg.output.dir}/all_leads_{utcnow():%Y%m%d}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     write_csv(out, rows, EXPORT_COLUMNS)
@@ -108,7 +117,7 @@ def cmd_reverify(args: argparse.Namespace) -> int:
     verifier = make_verifier(cfg, Secrets.from_env(), store, api_http)
     report = reverify_leads(store, verifier, args.older_than, cfg.verification.greylist_retry_seconds)
     print(report.summary())
-    rows = store.all_leads()
+    rows = Suppression(cfg.suppression_file).filter_rows(store.all_leads())
     out = Path(f"{cfg.output.dir}/verified_leads_{utcnow():%Y%m%d-%H%M%S}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     write_csv(out, rows, EXPORT_COLUMNS)
@@ -172,10 +181,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     for noisy in ("urllib3", "httpx", "httpx2", "anthropic"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     load_dotenv()
+    # `docker stop` sends SIGTERM: turn it into SystemExit so cleanup (writing lead files) runs.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         return args.func(args)
     except (SetupError, LLMUnavailable, FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, PermissionError) as exc:
+        print(
+            f"error: cannot write the database or output files ({exc}). If you run in Docker, make the "
+            "mounted folders writable by the container user: sudo chown -R 1000:1000 data output",
+            file=sys.stderr,
+        )
         return 2
     except KeyboardInterrupt:
         return 130

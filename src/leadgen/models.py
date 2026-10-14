@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Optional
+
+_HONORIFICS = {"dr", "mr", "mrs", "ms", "miss", "mx", "prof", "coach", "sir", "dame", "chef", "rev"}
+_SUFFIXES = {
+    "jr", "sr", "ii", "iii", "iv", "mba", "md", "dds", "dmd", "dpt", "phd", "cpa", "rn", "np", "pa-c", "esq",
+    "dc", "do", "od", "lmt", "cpt", "pmp", "msc", "bsc", "ma", "ba",
+}
+
+
+def _ascii_letters(word: str) -> str:
+    return re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", word).encode("ascii", "ignore").decode().lower())
+
 
 DateSource = Literal["platform_api", "post_id", "search_index", "feed", "import"]
 VerificationStatus = Literal["deliverable", "undeliverable", "risky", "unknown"]
@@ -24,6 +37,9 @@ class RawPost:
     author_url: Optional[str] = None
     posted_at: Optional[datetime] = None
     date_source: Optional[DateSource] = None
+    # For loose dates ("2w", "Oct 5"): the earliest/latest instant the post could be from.
+    posted_earliest: Optional[datetime] = None
+    posted_latest: Optional[datetime] = None
     query: Optional[str] = None
     # Set for posts found through a niche growth-signal query rather than an intent query.
     niche: Optional[str] = None
@@ -61,10 +77,23 @@ class Person:
     evidence: str = ""
 
     @property
-    def first_last(self) -> tuple[str, str] | None:
+    def name_parts(self) -> list[str]:
+        """Name words without honorifics, credentials, suffixes, pronouns or emoji:
+        'Dr. Amy Chen, DDS' -> ['Amy', 'Chen'], 'Mark Smith Jr.' -> ['Mark', 'Smith']."""
         if not self.name:
-            return None
-        parts = [p for p in self.name.replace(",", " ").split() if p]
+            return []
+        name = re.sub(r"\([^)]*\)", " ", self.name).split(",", 1)[0]
+        words = [w.strip(".'’") for w in name.split()]
+        words = [w for w in words if w and _ascii_letters(w)]
+        while words and words[0].lower().rstrip(".") in _HONORIFICS:
+            words.pop(0)
+        while words and words[-1].lower().replace(".", "") in _SUFFIXES:
+            words.pop()
+        return words
+
+    @property
+    def first_last(self) -> tuple[str, str] | None:
+        parts = self.name_parts
         if len(parts) < 2:
             return None
         return parts[0], parts[-1]
@@ -87,6 +116,9 @@ class VerificationResult:
     checked_at: Optional[datetime] = None
     # True when the answer was "try again later" (greylisting); worth re-checking in a few minutes.
     retryable: bool = False
+    # True when no answer came back because of OUR side (DNS down, port 25 unreachable, verifier
+    # API failing): the address was not judged, so the post should be tried again on a later run.
+    transient: bool = False
 
     @property
     def deliverable(self) -> bool:

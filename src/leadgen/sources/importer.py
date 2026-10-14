@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Iterable
 
-from leadgen.dates import Window, parse_date
+from leadgen.dates import Window, date_bounds, datetime_from_post_url, parse_date
 from leadgen.models import RawPost
 from leadgen.sources.base import NicheTarget, clean_text, platform_for_url
 
@@ -20,17 +20,18 @@ log = logging.getLogger(__name__)
 
 
 def _rows(path: Path) -> Iterable[dict[str, Any]]:
+    # utf-8-sig: Excel's "CSV UTF-8" export starts with a byte-order mark.
     if path.suffix.lower() in (".jsonl", ".ndjson"):
-        with path.open() as fh:
+        with path.open(encoding="utf-8-sig") as fh:
             for line in fh:
                 line = line.strip()
                 if line:
                     yield json.loads(line)
     elif path.suffix.lower() == ".json":
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         yield from (data if isinstance(data, list) else [data])
     else:
-        with path.open(newline="") as fh:
+        with path.open(newline="", encoding="utf-8-sig") as fh:
             yield from csv.DictReader(fh)
 
 
@@ -51,6 +52,9 @@ class ImportSource:
                 if not url:
                     continue
                 count += 1
+                date_raw = str(row.get("posted_at") or "")
+                exact = datetime_from_post_url(url)  # beats whatever date the export claims
+                earliest, latest = (None, None) if exact else (date_bounds(date_raw, window.now) or (None, None))
                 yield RawPost(
                     source=self.name,
                     platform=(row.get("platform") or platform_for_url(url)).lower(),
@@ -58,8 +62,10 @@ class ImportSource:
                     title=clean_text(row.get("title") or "", 500),
                     text=clean_text(row.get("text") or ""),
                     author=row.get("author") or None,
-                    posted_at=parse_date(str(row.get("posted_at") or ""), window.now),
-                    date_source="import",
+                    posted_at=exact or parse_date(date_raw, window.now),
+                    date_source="post_id" if exact else "import",
+                    posted_earliest=earliest,
+                    posted_latest=latest,
                     query=str(path),
                     extra={k: row[k] for k in ("business_name", "website") if row.get(k)},
                 )
