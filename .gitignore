@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# Secrets and local config
+.env
+/config.yaml
+
+# Runtime data (contains personal data - never commit)
+/data/
+/output/
+/suppression.txt

@@ -1,0 +1,91 @@
+# Copy to config.yaml and edit. Secrets (API keys) go in .env, never here.
+# Every key is optional; anything you leave out uses the default shown.
+
+agency:
+  name: "Your Agency"
+  services:
+    - social media management
+    - paid ads management (Meta, Instagram, TikTok, Google)
+    - content creation for social media
+  target_locations: []          # e.g. ["United States", "London, UK"]; empty = anywhere. Claude drops
+                                # businesses clearly elsewhere; niche research focuses on these
+  ideal_client: >-
+    Small and mid-sized businesses, local businesses, startups and founders who want to
+    grow through social media and paid ads.
+
+window:
+  max_age_days: 14              # only posts between 2 and 14 days old (your requirement);
+  min_age_days: 2               # set to 0 to also take posts from the last 2 days
+
+intent:
+  min_score: 70                 # Claude's 0-100 warmth score for explicit requests
+  include_growth_signals: true  # also keep e.g. "we just opened" posts in researched niches
+  growth_signal_min_score: 75
+
+sources:
+  search:
+    enabled: true
+    provider: auto              # auto | brave | serper | claude
+    platforms: [linkedin, instagram, facebook, x, craigslist, web]
+    results_per_query: 20
+    extra_queries: []           # e.g. ['site:linkedin.com/posts "need a tiktok ads"']
+  reddit:
+    enabled: true
+    subreddits: [forhire, hiring, smallbusiness, Entrepreneur, startups, marketing, socialmedia,
+                 PPC, FacebookAds, digital_marketing, jobbit, freelance_forhire]
+    max_results_per_subreddit: 100
+  rss: []                       # - {url: "https://example.com/jobs.rss", platform: web}
+  imports: []                   # CSV / JSONL exports from other tools, see README
+
+niches:
+  auto_research: true           # Claude researches niches with web search...
+  refresh_days: 7               # ...and refreshes them weekly
+  max_niches: 6
+  seed_niches:
+    - newly opened gyms and fitness studios
+    - recently launched startups
+    - new restaurants, cafes and med spas
+
+enrichment:
+  crawl_website: true
+  max_pages_per_site: 6
+  max_chars_per_page: 15000     # cap on website text sent to Claude per business
+  use_hunter: auto              # auto (if HUNTER_API_KEY set) | always | never
+  max_email_candidates: 8
+  max_contacts_per_business: 1
+
+verification:
+  smtp: true                    # needs outbound port 25 - see README
+  smtp_from: verify@yourdomain.com   # CHANGE: an address on a domain you own
+  helo_host: mail.yourdomain.com     # CHANGE: hostname that resolves to your server's IP
+  smtp_timeout: 12
+  provider: auto                # auto | zerobounce | neverbounce | millionverifier | none
+  confirmations_required: any   # any | all  (all = SMTP *and* provider must both confirm)
+  trust_provider_on_catch_all: false  # true: on catch-all domains, accept if the API confirms the mailbox
+  allow_free_email_providers: true   # owners of small businesses often use gmail
+  max_inactive_days: 365        # ZeroBounce activity data: reject mailboxes idle longer
+  cache_days: 30
+
+llm:
+  model: claude-opus-5-5
+  classify_effort: low
+  extract_effort: low
+  research_effort: high
+  server_side_fallback: true
+  max_web_searches: 8           # per Claude research call (niche research / Claude-backed search)
+
+output:
+  dir: output
+  formats: [csv, json]
+  write_rejected: true          # rejected_*.csv explains why each post was dropped
+  webhook_format: json          # json | slack - used when LEADGEN_WEBHOOK_URL is set in .env
+
+http:
+  user_agent: "LeadGenAgent/0.1 (+https://yourdomain.com/bot)"
+  timeout: 15
+  respect_robots_txt: true
+  per_host_delay: 1.0
+
+db_path: data/leadgen.db
+suppression_file: data/suppression.txt   # opt-outs; lives next to the database
+workers: 4
