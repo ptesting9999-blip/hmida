@@ -215,7 +215,7 @@ class Doctor:
                 )
 
         provider_ok = provider is not None and provider.status == "ok"
-        if v.max_inactive_days is not None and not (provider_ok and provider is not None and provider.name == "ZeroBounce"):
+        if v.max_inactive_days is not None and not self.secrets.zerobounce_api_key:
             checks.append(Check("Dormant mailboxes", "warn",
                                 "inactive mailboxes can't be detected: only ZeroBounce reports mailbox activity",
                                 "add ZEROBOUNCE_API_KEY to filter dormant inboxes (exports show 'activity: unknown' until then)"))

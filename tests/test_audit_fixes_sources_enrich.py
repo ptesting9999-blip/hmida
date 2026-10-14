@@ -370,3 +370,10 @@ def test_validation_error_in_niche_research_does_not_abort_run(tmp_path):
     agent.niche_researcher = Broken()
     report = agent.run(now=NOW)
     assert report.niches == []
+
+
+def test_poster_name_grounding_ignores_accents_and_punctuation():
+    from leadgen.pipeline import _comparable
+
+    assert _comparable("José O’Neil") in _comparable("Hi, I'm Jose O'Neil, owner of Acme")
+    assert _comparable("Ann Lee") not in _comparable("Joanne Leeds here")  # whole words only

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -78,6 +80,13 @@ class RunReport:
             lines.append("Rejections by stage: " + ", ".join(f"{k}={v}" for k, v in sorted(by_stage.items())))
         lines += [f"Wrote {f}" for f in self.files]
         return "\n".join(lines)
+
+
+def _comparable(text: str) -> str:
+    """Lowercase ASCII words only, so "José O’Neil" and "Jose O'Neil" compare equal."""
+    text = re.sub(r"['’‘`]", "", text)  # O'Neil / O’Neil -> ONeil
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return " " + " ".join(re.sub(r"[^a-z0-9]+", " ", ascii_text).split()) + " "
 
 
 def _real_name(name: Optional[str]) -> Optional[str]:
@@ -274,9 +283,9 @@ class LeadAgent:
             return PostOutcome(post, rejection=Rejection(post.url, post.platform, "intent", reason, a.business_name or ""), assessment=a)
 
         content_lower = post.content().lower()
-        hint_text = build_user_message(post, include_unverified=False).lower()  # page-sourced text only
+        hint_text = _comparable(build_user_message(post, include_unverified=False))  # page-sourced text only
         poster_name = _real_name(a.poster_name)
-        if poster_name and poster_name.lower() not in hint_text:
+        if poster_name and _comparable(poster_name) not in hint_text:
             poster_name = None  # not in the post or its metadata: Claude guessed it
         ctx = BusinessContext(
             business_name=a.business_name or post.extra.get("business_name"),
