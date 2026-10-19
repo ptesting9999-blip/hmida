@@ -15,3 +15,17 @@ search:
 outgoing:
   request_timeout: 6.0
   max_request_timeout: 15.0
+
+# Turn on the big web engines (several are off by default). Any that a network blocks just
+# time out after outgoing.request_timeout; the rest still answer.
+engines:
+  - name: bing
+    disabled: false
+  - name: google
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: startpage
+    disabled: false
