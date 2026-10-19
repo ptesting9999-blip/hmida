@@ -100,9 +100,8 @@ def cmd_suppress(args: argparse.Namespace) -> int:
 
 def cmd_export(args: argparse.Namespace) -> int:
     cfg = _config(args.config)
-    rows = Store(cfg.db_path).all_leads(include_inactive=args.all)
-    if not args.all:
-        rows = Suppression(cfg.suppression_file).filter_rows(rows)  # opt-outs never leave the building
+    # --all adds leads whose email stopped verifying; opt-outs are never exported.
+    rows = Suppression(cfg.suppression_file).filter_rows(Store(cfg.db_path).all_leads(include_inactive=args.all))
     out = Path(args.out or f"{cfg.output.dir}/all_leads_{utcnow():%Y%m%d}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     write_csv(out, rows, EXPORT_COLUMNS)
@@ -163,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = sub.add_parser("export", parents=[common], help="export every lead delivered so far to CSV")
     export.add_argument("--out", help="output CSV path")
-    export.add_argument("--all", action="store_true", help="include leads whose email no longer verifies")
+    export.add_argument("--all", action="store_true", help="include leads whose email no longer verifies (opt-outs are always left out)")
     export.set_defaults(func=cmd_export)
 
     reverify = sub.add_parser("reverify", parents=[common], help="re-check stored leads' emails before a campaign")

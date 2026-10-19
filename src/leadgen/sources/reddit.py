@@ -85,7 +85,13 @@ class RedditSource:
             }
             if after:
                 params["after"] = after
-            data = self.http.get_json(f"{base}/r/{subreddit}/search{suffix}", params=params, headers=headers)
+            try:
+                data = self.http.get_json(f"{base}/r/{subreddit}/search{suffix}", params=params, headers=headers)
+            except (requests.RequestException, ValueError) as exc:
+                if not items:
+                    raise
+                log.warning("reddit r/%s page %d failed (%s); keeping earlier pages", subreddit, _ + 1, exc)
+                break
             if not headers:
                 time.sleep(self.anon_delay)
             listing = data.get("data") or {}

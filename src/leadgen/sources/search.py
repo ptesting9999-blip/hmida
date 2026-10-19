@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Iterable, Optional, Protocol
 
 import requests
@@ -124,6 +125,45 @@ class SerperSearch:
                     )
                 )
             if len(organic) < self.PAGE_SIZE:
+                break
+            page += 1
+        return hits[:limit]
+
+
+class SearxngSearch:
+    """Your own SearXNG instance (https://docs.searxng.org): free metasearch with a JSON API.
+
+    The instance must have `json` in search.formats (docker-compose.free.yml sets that up).
+    """
+
+    name = "searxng"
+    phrases_per_query = 3
+    MAX_PAGES = 3
+
+    def __init__(self, base_url: str, http: HttpClient) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.http = http
+
+    def search(self, query: str, window: Optional[Window], limit: int, niche: Optional[str] = None) -> list[SearchHit]:
+        hits: list[SearchHit] = []
+        page = 1
+        while len(hits) < limit and page <= self.MAX_PAGES:
+            params: dict[str, object] = {"q": query, "format": "json", "pageno": page}
+            if window is not None:
+                span = window.now - window.start
+                params["time_range"] = "day" if span <= timedelta(days=1) else "month" if span <= timedelta(days=31) else "year"
+            data = self.http.get_json(f"{self.base_url}/search", params=params)
+            results = data.get("results") or []
+            for r in results:
+                hits.append(
+                    SearchHit(
+                        url=r.get("url", ""),
+                        title=_strip_html(r.get("title", "")),
+                        snippet=_strip_html(r.get("content", "") or ""),
+                        date_text=r.get("publishedDate") or None,
+                    )
+                )
+            if not results:
                 break
             page += 1
         return hits[:limit]

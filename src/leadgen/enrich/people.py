@@ -15,9 +15,16 @@ from leadgen.models import Person
 EXCLUDED_TITLES = re.compile(
     r"\b(assistant|intern|coordinator|receptionist|support|associate|trainee|volunteer|apprentice|"
     r"(product|process|project|account|data|content|channel) owner|engineer(ing)?|developer|designer|"
-    r"vice[ -]president(?!,? (of )?(marketing|growth|brand))|vp\b(?!,? (of )?(marketing|growth|brand)))",
+    r"vice[ -]president(?!,? (of )?(marketing|growth|brand))|vp(?!,? (of )?(marketing|growth|brand)))\b",
     re.I,
 )
+# Founders and owners stay decision-makers whatever else they do ("Founder & Lead Designer").
+_OWNER_TITLES = re.compile(
+    r"\b(co-?founder|founder|founding partner|proprietor|co-?owner)\b|"
+    r"(?<!product )(?<!process )(?<!project )(?<!account )(?<!content )(?<!channel )(?<!data )\bowner\b",
+    re.I,
+)
+_WORKS_FOR = re.compile(r"\b(assistant|intern|coordinator|secretary)\s+(to|for)\b|\b(executive|personal) assistant\b", re.I)
 # (pattern, weight). The highest matching weight wins.
 _TITLE_WEIGHTS: list[tuple[re.Pattern[str], float]] = [
     (re.compile(r"\b(co-?owner|owner|proprietor|co-?founder|founder|founding partner)\b", re.I), 1.0),
@@ -34,9 +41,16 @@ def is_excluded_title(title: Optional[str]) -> bool:
 
 
 def title_weight(title: Optional[str]) -> float:
-    if not title or is_excluded_title(title):
+    if not title:
         return 0.0
-    return max((w for pat, w in _TITLE_WEIGHTS if pat.search(title.strip())), default=0.0)
+    title = title.strip()
+    if _WORKS_FOR.search(title):  # "Executive Assistant to the CEO" is not the CEO
+        return 0.0
+    if _OWNER_TITLES.search(title):
+        return 1.0
+    if is_excluded_title(title):
+        return 0.0
+    return max((w for pat, w in _TITLE_WEIGHTS if pat.search(title)), default=0.0)
 
 
 def is_decision_maker(person: Person) -> bool:

@@ -83,10 +83,12 @@ class RunReport:
 
 
 def _comparable(text: str) -> str:
-    """Lowercase ASCII words only, so "José O’Neil" and "Jose O'Neil" compare equal."""
+    """Words without accents, case or punctuation, so "José O’Neil" and "jose o'neil" match.
+    Works for any script (Иван Петров), not only Latin."""
     text = re.sub(r"['’‘`]", "", text)  # O'Neil / O’Neil -> ONeil
-    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
-    return " " + " ".join(re.sub(r"[^a-z0-9]+", " ", ascii_text).split()) + " "
+    decomposed = unicodedata.normalize("NFKD", text)
+    plain = "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+    return " " + " ".join(re.findall(r"[^\W_]+", plain)) + " "
 
 
 def _real_name(name: Optional[str]) -> Optional[str]:
@@ -177,10 +179,11 @@ class LeadAgent:
             # Outbox: hand over every saved lead not exported yet - this run's, and any left behind
             # by an earlier run that was killed before it could write its files.
             rows = self.store.unexported_leads()
-            report.files = self.writer.write(rows, report.rejections, report.started_at)
+            keep = self.verifier.suppression.filter_rows(rows)  # opted out since they were saved
+            report.files = self.writer.write(keep, report.rejections, report.started_at)
             self.store.mark_exported([r["verified_email"] for r in rows])
-            if len(rows) > len(report.leads):
-                log.info("delivered %d leads saved by an earlier, interrupted run", len(rows) - len(report.leads))
+            if len(keep) > len(report.leads):
+                log.info("delivered %d leads saved by an earlier, interrupted run", len(keep) - len(report.leads))
         return report
 
     def _record(self, outcome: PostOutcome, report: RunReport) -> None:
@@ -285,7 +288,7 @@ class LeadAgent:
         content_lower = post.content().lower()
         hint_text = _comparable(build_user_message(post, include_unverified=False))  # page-sourced text only
         poster_name = _real_name(a.poster_name)
-        if poster_name and _comparable(poster_name) not in hint_text:
+        if poster_name and (not _comparable(poster_name).strip() or _comparable(poster_name) not in hint_text):
             poster_name = None  # not in the post or its metadata: Claude guessed it
         ctx = BusinessContext(
             business_name=a.business_name or post.extra.get("business_name"),

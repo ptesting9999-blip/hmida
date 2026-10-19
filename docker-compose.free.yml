@@ -1,0 +1,48 @@
+# Completely free stack: your own search engine (SearXNG), a local AI model (Ollama) and the agent.
+#   docker compose -f docker-compose.free.yml run --rm leadgen doctor   # check the setup
+#   docker compose -f docker-compose.free.yml up -d                     # run every 6 hours
+# The first start downloads the AI model (~5 GB). Leads land in ./output.
+services:
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-this-to-a-long-random-string}
+      GRANIAN_HOST: 0.0.0.0     # the image binds IPv6 by default, which fails on IPv4-only hosts
+    volumes:
+      - ./searxng:/etc/searxng
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+
+  ollama-pull:                  # downloads the model once, then exits
+    image: ollama/ollama:latest
+    depends_on: [ollama]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "sleep 3 && ollama pull ${OLLAMA_MODEL:-qwen2.5:7b}"]
+    restart: "no"
+
+  leadgen:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      searxng:
+        condition: service_started
+      ollama-pull:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false         # optional: e.g. ZEROBOUNCE_API_KEY for the free 100 checks/month
+    volumes:
+      - ./config.free.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./output:/app/output
+    command: ["run", "--every", "6"]
+    stop_grace_period: 2m
+
+volumes:
+  ollama:

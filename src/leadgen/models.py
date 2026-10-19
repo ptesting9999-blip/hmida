@@ -60,6 +60,10 @@ def normalize_url(url: str) -> str:
         if url.startswith(prefix):
             url = url[len(prefix) :]
     url = url.removeprefix("www.").removeprefix("m.")
+    host, sep, rest = url.partition("/")
+    host = host.lower()
+    if host == "fb.com" or host.endswith(".facebook.com"):
+        url = "facebook.com" + sep + rest  # web./mbasic./touch./fb.com are the same posts
     url = url.split("#", 1)[0]
     # Tracking parameters make the same post look new; drop the whole query string except
     # for hosts where it identifies the content.
@@ -87,8 +91,8 @@ class Person:
         words = [w for w in words if w and _ascii_letters(w)]
         while words and words[0].lower().rstrip(".") in _HONORIFICS:
             words.pop(0)
-        while words and words[-1].lower().replace(".", "") in _SUFFIXES:
-            words.pop()
+        while len(words) > 2 and words[-1].lower().replace(".", "") in _SUFFIXES:
+            words.pop()  # "Mark Smith Jr" -> Mark Smith, but "Linh Do" keeps its surname
         return words
 
     @property

@@ -57,8 +57,11 @@ class IntentConfig(_Section):
 
 class SearchSourceConfig(_Section):
     enabled: bool = True
-    # auto picks the first backend with credentials: brave, serper, then claude.
-    provider: Literal["auto", "brave", "serper", "claude"] = "auto"
+    # auto picks the first one available: brave, serper (paid keys), searxng (free, self-hosted),
+    # then claude (only when llm.provider is claude).
+    provider: Literal["auto", "brave", "serper", "searxng", "claude"] = "auto"
+    # Your own SearXNG instance (free): e.g. http://localhost:8080 or http://searxng:8080 in Docker.
+    searxng_url: Optional[str] = None
     platforms: list[str] = Field(
         default_factory=lambda: ["linkedin", "instagram", "facebook", "x", "craigslist", "web"]
     )
@@ -147,6 +150,10 @@ class VerificationConfig(_Section):
     helo_host: str = "localhost"
     smtp_timeout: float = Field(default=12.0, gt=0)
     smtp_port: int = 25
+    # MX lookups. system: this machine's resolver. doh: DNS-over-HTTPS (doh_url) only.
+    # auto: the resolver, with DNS-over-HTTPS as a second opinion when it fails.
+    dns: Literal["auto", "system", "doh"] = "auto"
+    doh_url: str = "https://cloudflare-dns.com/dns-query"
     # auto uses whichever provider has an API key: zerobounce, neverbounce, millionverifier.
     provider: Literal["auto", "zerobounce", "neverbounce", "millionverifier", "none"] = "auto"
     # any: at least one enabled check (smtp/provider) confirms and none objects.
@@ -167,6 +174,11 @@ class VerificationConfig(_Section):
 
 
 class LLMConfig(_Section):
+    # claude: best judgement, paid API. ollama: free model on your own computer.
+    # none: free built-in rules (no AI) - less nuanced, zero setup.
+    provider: Literal["claude", "ollama", "none"] = "claude"
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
     model: str = "claude-opus-5-5"
     classify_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
     extract_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"

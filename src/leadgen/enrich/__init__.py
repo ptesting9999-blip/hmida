@@ -62,12 +62,17 @@ def _name_key(name: Optional[str]) -> str:
     return " ".join((name or "").lower().split())
 
 
+def _letters(text: str) -> str:
+    return re.sub(r"[^a-z]", "", text.lower())
+
+
 def _same_business(domain: str, final: str, business_name: Optional[str]) -> bool:
     """Is a redirect target the same business (acme.com -> acmefitness.com), not a parking page?"""
     if not normalize_domain(final):
         return False
-    a, b = domain.split(".")[0], final.split(".")[0]
-    return a in b or b in a or bool(business_name and name_matches(business_name, final))
+    a, b = _letters(domain.split(".")[0]), _letters(final.split(".")[0])
+    contained = (len(a) >= 4 and a in b) or (len(b) >= 4 and b in a)
+    return contained or bool(business_name and name_matches(business_name, final))
 
 
 class ContactFinder:
@@ -96,7 +101,10 @@ class ContactFinder:
             if not site.reachable:
                 notes.append(f"website {domain} unreachable")
             elif site.final_domain and site.final_domain != domain:
-                if _same_business(domain, site.final_domain, ctx.business_name):
+                final = site.final_domain
+                if final.endswith("." + domain) or domain.endswith("." + final):
+                    pass  # the same site on a subdomain: keep the mail domain
+                elif _same_business(domain, final, ctx.business_name):
                     # Mailboxes live on the domain the business actually uses now.
                     notes.append(f"{domain} redirects to {site.final_domain}")
                     domain = site.final_domain
@@ -105,10 +113,10 @@ class ContactFinder:
                     site = None
 
         people, hunter_pattern, transient = self._gather_people(ctx, domain, site, notes)
-        pattern = hunter_pattern or self._pattern(people, site, domain)
-        site_emails = sorted(site.emails) if site else []
         first_names = Counter(ascii_name(p.name_parts[0]) for p, _ in people if p.name_parts)
         shared_first = {n for n, count in first_names.items() if n and count > 1}
+        pattern = hunter_pattern or self._pattern(people, site, domain, shared_first)
+        site_emails = sorted(site.emails) if site else []
 
         makers: list[DecisionMaker] = []
         for person, weight in people:
@@ -213,13 +221,17 @@ class ContactFinder:
             notes.append(f"hunter: {len(result.people)} people")
         return list(merged.values()), hunter_pattern, transient
 
-    def _pattern(self, people: list[tuple[Person, float]], site: Optional[SiteProfile], domain: Optional[str]) -> Optional[str]:
+    def _pattern(
+        self, people: list[tuple[Person, float]], site: Optional[SiteProfile], domain: Optional[str], shared_first: set[str]
+    ) -> Optional[str]:
         if not domain:
             return None
         known = [(p.email, p) for p, _ in people if p.email]
         known += [(e, p) for e in (site.emails if site else ()) for p, _ in people]
         for email, person in known:
             fl = person.first_last
+            if email and _letters(email.split("@")[0]) in shared_first:
+                continue  # "dan@" could be either Dan; it proves no pattern
             if fl and email and split_email(email)[1] == domain:
                 pattern = infer_pattern(email, *fl)
                 if pattern:
@@ -244,6 +256,8 @@ class ContactFinder:
             email = email.strip().lower()
             if is_role_account(email):
                 return
+            if source != "post" and _letters(email.split("@")[0]) in shared_first:
+                return  # "dan@" can't be told apart when two people on the team are called Dan
             if email not in out or out[email].priority < priority:
                 out[email] = EmailCandidate(email=email, person=person, source=source, priority=priority)
 
@@ -263,9 +277,6 @@ class ContactFinder:
             if email_domain != domain and not is_free_provider(email_domain):
                 continue
             if not email_matches_name(email, first, last):
-                continue
-            # "dan@" can't be told apart when two people on the team are called Dan.
-            if first_ascii in shared_first and re.sub(r"[^a-z]", "", email.split("@")[0]) == first_ascii:
                 continue
             add(email, "website", 85 + weight)
         if domain and fl:

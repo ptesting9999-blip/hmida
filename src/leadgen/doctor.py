@@ -1,7 +1,7 @@
 """`leadgen doctor`: check that keys, DNS and port 25 work before the first real run.
 
 Every check is cheap: no search credits, verification credits or Claude tokens are spent,
-except one search query when a Brave / Serper key is configured.
+except one search query when a Brave / Serper key or a SearXNG instance is configured.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import requests
 
 from leadgen.config import Config, Secrets
 from leadgen.llm import has_credentials
-from leadgen.verify.dns_check import MxResult, lookup_mx
+from leadgen.verify.dns_check import MxLookup, MxResult
 from leadgen.verify.verifier import DNS_CANARY_DOMAIN
 
 Status = Literal["ok", "warn", "fail"]
@@ -68,7 +68,7 @@ class Doctor:
         *,
         session: Optional[requests.Session] = None,
         claude: Optional[anthropic.Anthropic] = None,
-        mx_lookup: Callable[[str], MxResult] = lookup_mx,
+        mx_lookup: Optional[Callable[[str], MxResult]] = None,
         connect: Callable[[str, int, float], bytes] | None = None,
         resolve_host: Callable[[str], bool] | None = None,
     ) -> None:
@@ -77,14 +77,15 @@ class Doctor:
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", cfg.http.user_agent)
         self._claude = claude
-        self.mx_lookup = mx_lookup
+        self.mx_lookup = mx_lookup or MxLookup(cfg.verification.dns, cfg.verification.doh_url)
         self.connect = connect or _smtp_banner
         self.resolve_host = resolve_host or _resolves
 
     def run(self) -> list[Check]:
-        checks = [self.claude(), self.search(), self.reddit(), self.hunter()]
+        checks = [self.brain(), self.search(), self.reddit(), self.hunter()]
         checks += self.verification()
         checks.append(self.output_dir())
+        checks.append(self.cost())
         return checks
 
     def _get(self, url: str, **kw: Any) -> Any:
@@ -92,7 +93,29 @@ class Doctor:
         resp.raise_for_status()
         return resp.json()
 
-    # -- Claude ------------------------------------------------------------------------
+    # -- the brain (Claude, a local model, or rules) -------------------------------------
+
+    def brain(self) -> Check:
+        provider = self.cfg.llm.provider
+        if provider == "none":
+            return Check("Brain", "ok", "free built-in rules (no AI): explicit requests and opening announcements only")
+        if provider == "ollama":
+            return self.ollama()
+        return self.claude()
+
+    def ollama(self) -> Check:
+        name, url, model = "Local model (Ollama)", self.cfg.llm.ollama_url.rstrip("/"), self.cfg.llm.ollama_model
+        try:
+            tags = self._get(f"{url}/api/tags")
+        except (requests.RequestException, ValueError) as exc:
+            return Check(name, "fail", f"Ollama is not answering at {url} ({_http_error(exc)})",
+                         "start it (docker compose -f docker-compose.free.yml up -d, or `ollama serve`), "
+                         "or set llm.provider: none")
+        installed = {m.get("name", "") for m in tags.get("models") or []}
+        wanted = model if ":" in model else f"{model}:latest"
+        if model not in installed and wanted not in installed:
+            return Check(name, "fail", f"model {model} is not installed", f"run: ollama pull {model}")
+        return Check(name, "ok", f"{model} ready at {url}")
 
     def claude(self) -> Check:
         name = "Claude API"
@@ -136,10 +159,32 @@ class Doctor:
             return Check(name, "fail", f"search API check failed ({_http_error(exc)})", "check BRAVE_API_KEY / SERPER_API_KEY")
         if choice in ("brave", "serper"):
             return Check(name, "fail", f"provider {choice} selected but no key set", f"set {choice.upper()}_API_KEY")
-        return Check(
-            name, "warn", "no Brave/Serper key: Claude's web search tool will be used (works, but costs more per run)",
-            "add BRAVE_API_KEY or SERPER_API_KEY to cut search cost",
-        )
+        url = self.cfg.sources.search.searxng_url
+        if choice in ("auto", "searxng") and url:
+            return self.searxng(url.rstrip("/"))
+        if choice == "searxng":
+            return Check(name, "fail", "provider searxng selected but no URL set", "set sources.search.searxng_url")
+        if self.cfg.llm.provider == "claude":
+            return Check(
+                name, "warn", "no Brave/Serper key: Claude's web search tool will be used (works, but costs more per run)",
+                "add BRAVE_API_KEY or SERPER_API_KEY, or run SearXNG (free) and set sources.search.searxng_url",
+            )
+        return Check(name, "warn", "no web search: only Reddit, RSS feeds and imports will be searched",
+                     "run SearXNG (free: docker compose -f docker-compose.free.yml up -d) and set sources.search.searxng_url")
+
+    def searxng(self, url: str) -> Check:
+        name = "Post search (SearXNG)"
+        try:
+            data = self._get(f"{url}/search", params={"q": "social media manager", "format": "json"})
+        except (requests.RequestException, ValueError) as exc:
+            if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 403:
+                return Check(name, "fail", "JSON output is disabled", "add json to search.formats in SearXNG's settings.yml")
+            return Check(name, "fail", f"not answering at {url} ({_http_error(exc)})", "start SearXNG or fix sources.search.searxng_url")
+        if data.get("results"):
+            return Check(name, "ok", f"working at {url}")
+        dead = [e[0] for e in data.get("unresponsive_engines") or [] if e]
+        detail = f"running, but its engines returned nothing ({', '.join(dead[:4])} unreachable)" if dead else "running, but returned no results"
+        return Check(name, "warn", detail, "SearXNG needs outbound internet access to reach Google/Bing/DuckDuckGo")
 
     def reddit(self) -> Check:
         name = "Reddit"
@@ -191,12 +236,15 @@ class Doctor:
 
         mx = self.mx_lookup(DNS_CANARY_DOMAIN)
         dns_ok = mx.status == "ok"
-        checks.append(
-            Check("DNS resolver", "ok", "MX lookups work")
-            if dns_ok
-            else Check("DNS resolver", "fail", f"cannot resolve MX for {DNS_CANARY_DOMAIN} ({mx.detail})",
-                       "this machine needs working DNS; every address would come back 'unknown'")
-        )
+        if dns_ok:
+            checks.append(Check("DNS resolver", "ok", f"working ({v.dns})"))
+        elif not v.smtp and provider is not None:
+            checks.append(Check("DNS resolver", "warn", f"cannot resolve MX for {DNS_CANARY_DOMAIN} ({mx.detail}); "
+                                f"{provider.name} will check domains instead", "allow outbound HTTPS to " + v.doh_url))
+        else:
+            checks.append(Check("DNS resolver", "fail", f"cannot resolve MX for {DNS_CANARY_DOMAIN} ({mx.detail})",
+                                "this machine needs working DNS or HTTPS access to " + v.doh_url +
+                                "; otherwise every address comes back 'unknown'"))
 
         smtp_ok = False
         if v.smtp:
@@ -291,6 +339,33 @@ class Doctor:
             return "fail", f"key rejected ({data['error']})"
         credits = int(data.get("credits") or 0)
         return ("ok" if credits > 0 else "fail"), f"{credits} credits left"
+
+    # -- cost ---------------------------------------------------------------------------
+
+    def cost(self) -> Check:
+        """Which paid services this setup uses. Free tiers are noted, not counted as paid."""
+        s, cfg = self.secrets, self.cfg
+        paid = []
+        if cfg.llm.provider == "claude":
+            paid.append("Claude API")
+        choice = cfg.sources.search.provider
+        if choice in ("auto", "brave") and s.brave_api_key:
+            paid.append("Brave Search")
+        elif choice in ("auto", "serper") and s.serper_api_key:
+            paid.append("Serper")
+        if s.hunter_api_key and cfg.enrichment.use_hunter != "never":
+            paid.append("Hunter.io")
+        provider = cfg.verification.provider
+        if provider != "none":
+            for key, name, label in ((s.zerobounce_api_key, "zerobounce", "ZeroBounce (free for 100 checks a month)"),
+                                     (s.neverbounce_api_key, "neverbounce", "NeverBounce"),
+                                     (s.millionverifier_api_key, "millionverifier", "MillionVerifier")):
+                if key and provider in ("auto", name):
+                    paid.append(label)
+                    break
+        if not paid:
+            return Check("Running cost", "ok", "free: no paid service is configured")
+        return Check("Running cost", "ok", "uses " + ", ".join(paid) + " (free tiers, where they exist, may cover light use)")
 
     # -- local -------------------------------------------------------------------------
 

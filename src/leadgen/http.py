@@ -16,6 +16,9 @@ log = logging.getLogger(__name__)
 
 # Business pages are small; anything bigger is a file or a trap. Read at most this much.
 MAX_PAGE_BYTES = 2_000_000
+# How long a robots.txt answer is trusted (RFC 9309: at most 24h), and a failed fetch's "disallow".
+ROBOTS_TTL = 24 * 3600
+ROBOTS_FAILURE_TTL = 30 * 60
 _TEXTUAL = ("html", "xml", "text", "rss", "atom")
 
 
@@ -42,7 +45,8 @@ class HttpClient:
         self.per_host_delay = per_host_delay
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", user_agent)
-        self._robots: dict[str, Optional[robotparser.RobotFileParser]] = {}
+        # base URL -> (parser or None for "no robots.txt", expiry as time.monotonic())
+        self._robots: dict[str, tuple[Optional[robotparser.RobotFileParser], float]] = {}
         self._last_hit: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -61,24 +65,29 @@ class HttpClient:
             return True
         parts = urlsplit(url)
         base = f"{parts.scheme}://{parts.netloc}"
+        now = time.monotonic()
         with self._lock:
-            cached = self._robots.get(base, False)
-        if cached is False:
+            entry = self._robots.get(base)
+        if entry is None or entry[1] <= now:
             rp: Optional[robotparser.RobotFileParser] = robotparser.RobotFileParser()
+            ttl = ROBOTS_TTL
             try:
                 resp = self.session.get(f"{base}/robots.txt", timeout=self.timeout)
                 if resp.status_code >= 500 or resp.status_code == 429:
                     rp.parse(["User-agent: *", "Disallow: /"])  # RFC 9309: unreachable means disallow
+                    ttl = ROBOTS_FAILURE_TTL  # ...for now; ask again later
                 elif resp.status_code >= 400:
                     rp = None  # no robots.txt: everything allowed
                 else:
                     rp.parse(resp.text.splitlines())
             except requests.RequestException:
                 rp.parse(["User-agent: *", "Disallow: /"])
+                ttl = ROBOTS_FAILURE_TTL
+            entry = (rp, now + ttl)
             with self._lock:
-                self._robots[base] = rp
-            cached = rp
-        return cached is None or cached.can_fetch(self.user_agent, url)
+                self._robots[base] = entry
+        parser = entry[0]
+        return parser is None or parser.can_fetch(self.user_agent, url)
 
     def fetch_page(self, url: str) -> Optional[Page]:
         """GET an HTML page for crawling. Returns None when disallowed or unreachable."""

@@ -151,13 +151,17 @@ def build_user_message(post: RawPost, include_unverified: bool = True) -> str:
 
 
 class IntentClassifier:
-    def __init__(self, cfg: Config, llm: LLM) -> None:
+    def __init__(self, cfg: Config, llm: Optional[LLM]) -> None:
         self.cfg = cfg
-        self.llm = llm
+        self.llm = llm  # None: free rule-based mode
         self.system = build_system_prompt(cfg)
 
     def assess(self, post: RawPost) -> Optional[IntentAssessment]:
-        """None when Claude could not judge the post; the pipeline then retries it on a later run."""
+        """None when the model could not judge the post; the pipeline then retries it on a later run."""
+        if self.llm is None:
+            from leadgen.rule_intent import assess_without_ai
+
+            return assess_without_ai(post, self.cfg)
         try:
             return self.llm.parse(
                 IntentAssessment,

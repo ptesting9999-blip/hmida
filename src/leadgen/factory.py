@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Union
 
 import anthropic
 
@@ -15,6 +15,7 @@ from leadgen.enrich.website import WebsiteCrawler
 from leadgen.http import HttpClient
 from leadgen.intent import IntentClassifier
 from leadgen.llm import LLM, LLMUnavailable
+from leadgen.local_llm import OllamaLLM
 from leadgen.niches import NicheResearcher
 from leadgen.output import OutputWriter
 from leadgen.pipeline import LeadAgent
@@ -26,11 +27,13 @@ from leadgen.sources import (
     RssSource,
     SearchBackend,
     SearchSource,
+    SearxngSearch,
     SerperSearch,
     Source,
 )
 from leadgen.store import Store
 from leadgen.verify import EmailVerifier
+from leadgen.verify.dns_check import MxLookup
 from leadgen.verify.providers import MillionVerifier, NeverBounce, VerificationProvider, ZeroBounce
 from leadgen.verify.smtp_check import SmtpProber
 
@@ -48,22 +51,45 @@ def make_http(cfg: Config) -> tuple[HttpClient, HttpClient]:
     return crawler, api
 
 
-def make_llm(cfg: Config, secrets: Secrets) -> LLM:
+Brain = Union[LLM, OllamaLLM]
+
+
+def make_llm(cfg: Config, secrets: Secrets) -> Optional[Brain]:
+    """The model that judges posts: Claude (paid), a local Ollama model (free) or None (free rules)."""
+    if cfg.llm.provider == "none":
+        return None
+    if cfg.llm.provider == "ollama":
+        return OllamaLLM(cfg.llm.ollama_url, cfg.llm.ollama_model)
     try:
         return LLM(cfg.llm, api_key=secrets.anthropic_api_key)
     except (anthropic.AnthropicError, LLMUnavailable) as exc:
-        raise SetupError(f"Claude is required: {exc}") from exc
+        raise SetupError(
+            f"Claude is selected (llm.provider: claude) but unusable: {exc}. For a free setup use "
+            "llm.provider: ollama or none (see config.free.yaml)"
+        ) from exc
 
 
-def make_search_backend(cfg: Config, secrets: Secrets, api_http: HttpClient, llm: LLM) -> SearchBackend:
-    choice = cfg.sources.search.provider
+def make_search_backend(cfg: Config, secrets: Secrets, api_http: HttpClient, llm: Optional[Brain]) -> Optional[SearchBackend]:
+    """Web search for public posts, or None when nothing is configured (Reddit/RSS still run)."""
+    s = cfg.sources.search
+    choice = s.provider
     if choice in ("auto", "brave") and secrets.brave_api_key:
         return BraveSearch(secrets.brave_api_key, api_http)
     if choice in ("auto", "serper") and secrets.serper_api_key:
         return SerperSearch(secrets.serper_api_key, api_http)
     if choice in ("brave", "serper"):
         raise SetupError(f"search provider {choice!r} selected but {choice.upper()}_API_KEY is not set")
-    return ClaudeWebSearch(llm, max_searches=cfg.llm.max_web_searches)
+    if choice in ("auto", "searxng") and s.searxng_url:
+        # Your own instance, but it relays to public engines: stay gentle.
+        return SearxngSearch(s.searxng_url, HttpClient(cfg.http.user_agent, 60.0, respect_robots_txt=False, per_host_delay=2.0))
+    if choice == "searxng":
+        raise SetupError("search provider 'searxng' selected but sources.search.searxng_url is not set")
+    if isinstance(llm, LLM):
+        return ClaudeWebSearch(llm, max_searches=cfg.llm.max_web_searches)
+    if choice == "claude":
+        raise SetupError("search provider 'claude' needs llm.provider: claude")
+    log.warning("no web search configured (set sources.search.searxng_url for free search); using Reddit/RSS/imports only")
+    return None
 
 
 def make_verification_provider(cfg: Config, secrets: Secrets, api_http: HttpClient) -> Optional[VerificationProvider]:
@@ -101,7 +127,10 @@ def make_verifier(cfg: Config, secrets: Secrets, store: Optional[Store], api_htt
             "or many mail servers will refuse the probe",
             v.smtp_from,
         )
-    return EmailVerifier(v, store=store, suppression=Suppression(cfg.suppression_file), prober=prober, provider=provider)
+    return EmailVerifier(
+        v, store=store, suppression=Suppression(cfg.suppression_file), prober=prober, provider=provider,
+        mx_lookup=MxLookup(v.dns, v.doh_url),
+    )
 
 
 def build_agent(cfg: Config, secrets: Secrets) -> LeadAgent:
@@ -111,7 +140,7 @@ def build_agent(cfg: Config, secrets: Secrets) -> LeadAgent:
     backend = make_search_backend(cfg, secrets, api_http, llm)
 
     sources: list[Source] = []
-    if cfg.sources.search.enabled:
+    if cfg.sources.search.enabled and backend is not None:
         sources.append(SearchSource(cfg.sources.search, backend))
     if cfg.sources.reddit.enabled:
         sources.append(RedditSource(cfg.sources.reddit, api_http, secrets.reddit_client_id, secrets.reddit_client_secret))
@@ -138,9 +167,10 @@ def build_agent(cfg: Config, secrets: Secrets) -> LeadAgent:
     )
     verifier = make_verifier(cfg, secrets, store, api_http)
     log.info(
-        "sources: %s | search: %s | verification: %s",
+        "brain: %s | sources: %s | search: %s | verification: %s",
+        cfg.llm.provider,
         ", ".join(s.name for s in sources),
-        backend.name,
+        backend.name if backend else "none",
         " + ".join(verifier.methods),
     )
     return LeadAgent(
@@ -152,5 +182,5 @@ def build_agent(cfg: Config, secrets: Secrets) -> LeadAgent:
         store=store,
         writer=OutputWriter(cfg.output, webhook_url=secrets.leadgen_webhook_url),
         niche_researcher=NicheResearcher(cfg, llm, store),
-        preflight=llm.preflight,
+        preflight=llm.preflight if llm is not None else None,
     )

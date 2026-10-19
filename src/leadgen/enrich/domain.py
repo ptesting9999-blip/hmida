@@ -77,7 +77,7 @@ def _tokens(text: str) -> list[str]:
 def name_matches(business_name: str, domain: str, title: str = "") -> bool:
     """Does this domain plausibly belong to the named business?
 
-    The business's most distinctive word must be in the domain: "Acme Fitness" matches
+    A distinctive (non-generic) word must be in the domain: "Acme Fitness" matches
     acmefitness.com and acme-fit.co.uk, never anytimefitness.com.
     """
     tokens = _tokens(business_name)
@@ -85,8 +85,8 @@ def name_matches(business_name: str, domain: str, title: str = "") -> bool:
     if not distinctive:
         return False  # "Fit Club": nothing to tell this business apart from any other
     label = domain.split(".")[0].replace("-", "")
-    if distinctive[0] not in label:
-        return False
+    if not any(t in label for t in distinctive):
+        return False  # only generic words in common: a different business
     compact = "".join(tokens)
     if compact in label or (len(label) >= 5 and label in compact):
         return True

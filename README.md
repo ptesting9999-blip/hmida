@@ -54,7 +54,7 @@ cp .env.example .env                 # add API keys
 
 | Key | Needed? | Used for |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | **required** | Intent classification, niche research, people extraction (default model `claude-opus-5-5`) |
+| `ANTHROPIC_API_KEY` | required for the default Claude brain; **not needed in [free mode](#run-it-100-free)** | Intent classification, niche research, people extraction (default model `claude-opus-5-5`) |
 | `BRAVE_API_KEY` or `SERPER_API_KEY` | strongly recommended | Searching public posts with an exact date range. Without one, Claude's own web search tool is used. That needs no extra setup but costs much more per run. |
 | `REDDIT_CLIENT_ID` / `_SECRET` | recommended | Reddit API at full rate limits (a free "script" app). Without it, slow anonymous access is used. |
 | `ZEROBOUNCE_API_KEY` (or NeverBounce / MillionVerifier) | recommended, **required if you can't use port 25** | Second verification opinion. ZeroBounce also returns mailbox activity, used to reject dormant inboxes. |
@@ -133,6 +133,58 @@ the leads it had already saved are written out at the start of the next run.
 You can also feed in posts from other tools you're licensed to use (a Sales Navigator export, a
 saved-search tool, a VA's spreadsheet). List CSV / JSONL files under `sources.imports`, with the
 columns `url, posted_at, text`, and optionally `platform, title, author, business_name, website`.
+
+## Run it 100% free
+
+No paid API is needed. Swap each paid part for a free one:
+
+| Part | Paid default | Free replacement | Setting |
+|---|---|---|---|
+| Brain (judging posts, reading websites) | Claude API | **Ollama**, a local AI model on your machine, or **built-in rules** (no AI) | `llm.provider: ollama` or `none` |
+| Web search for posts | Brave / Serper / Claude web search | **SearXNG**, your own private search engine (Google, Bing, DuckDuckGo results) | `sources.search.provider: searxng` + `searxng_url` |
+| Niche research | Claude with web search | Search queries written from your `seed_niches` | automatic |
+| Email verification | Verification APIs | **SMTP check over port 25** (free, unlimited), plus ZeroBounce's free plan (100 checks a month) if you want dormancy data | `verification.smtp: true` |
+| Reddit, RSS, imports | – | already free | – |
+
+**On your own computer or a VPS (best):** Docker runs everything with one command.
+
+```bash
+mkdir -p data output && sudo chown -R 1000:1000 data output
+# edit config.free.yaml: agency details, smtp_from, helo_host
+docker compose -f docker-compose.free.yml run --rm leadgen doctor
+docker compose -f docker-compose.free.yml up -d     # runs every 6 hours
+```
+
+The first start downloads the AI model (about 5 GB; it needs about 8 GB of RAM, or use
+`qwen2.5:3b`). SMTP verification needs outbound port 25, which most home ISPs and big clouds block.
+Cheap VPS providers unblock it on request. Without port 25, add a free `ZEROBOUNCE_API_KEY` to
+`.env`: 100 verifications a month.
+
+**In a Claude Code cloud session** (no port 25, no DNS):
+
+```bash
+scripts/run_in_cloud.sh doctor       # check
+scripts/run_in_cloud.sh --limit 20   # run
+```
+
+The script starts SearXNG in Docker and runs the agent with `config.cloud.yaml`: built-in rules,
+DNS-over-HTTPS, and ZeroBounce's free plan for verification. It needs two things from the cloud
+environment's settings (never paste keys into chat or commit them):
+
+1. **Network access: Full**, so SearXNG, Reddit and business websites can be reached.
+2. **`ZEROBOUNCE_API_KEY`** as an environment variable (free account at zerobounce.net). Port 25 is
+   closed in cloud sessions, so this is the only free way to verify mailboxes there.
+
+**What free mode costs you in quality:**
+
+* Built-in rules catch clear requests ("looking for a social media manager for my bakery") and
+  opening announcements, but miss subtle ones, and can't tell a person's role from context as well
+  as Claude. Ollama is in between. Every lead still goes through the same strict email
+  verification, so worse judgement means fewer leads, not bad emails.
+* SearXNG scrapes public search engines, which rate-limit heavy use. Keep `results_per_query` and
+  the number of niches modest, and run every 6 hours rather than every hour.
+* Niche research is not live: the agent works from your `seed_niches` instead of researching new
+  ones each week. Update them yourself now and then.
 
 ## Read this before relying on it
 

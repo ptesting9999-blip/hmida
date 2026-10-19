@@ -181,7 +181,9 @@ class EmailVerifier:
         checks = {"syntax": "ok", "role": "personal", "disposable": "no", "mx": mx.status}
         if mx.status == "ok":
             checks["mx"] = f"ok ({mx.hosts[0]})"
-        elif mx.status == "error" and self.provider is not None:
+        elif mx.status == "error" and self.provider is not None and (
+            self.prober is None or self.cfg.confirmations_required == "any"
+        ):
             # No usable DNS here (e.g. a proxy-only network). The verification API checks MX itself.
             checks["mx"] = f"not checked locally ({mx.detail}); left to {self.provider.name}"
         else:
@@ -225,7 +227,11 @@ class EmailVerifier:
             verdicts[self.provider.name] = status
             checks[self.provider.name] = detail
             reasons.append(f"{self.provider.name}: {detail}")
-            transient = transient or v.failed
+            # With SMTP enabled, a DNS failure means a check we wanted never ran: try again later.
+            skipped_smtp = mx.status == "error" and self.prober is not None
+            transient = transient or v.failed or (skipped_smtp and status != "deliverable")
+            if skipped_smtp:
+                reasons.append(f"smtp not run: {mx.detail}")
             if status in ("undeliverable", "risky"):
                 return _result(email, status, detail, checks)
         checks["activity"] = activity

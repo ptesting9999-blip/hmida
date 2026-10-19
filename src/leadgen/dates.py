@@ -176,6 +176,7 @@ def parse_absolute(text: str) -> Optional[datetime]:
 
 
 _COARSE_UNITS = {"day", "week", "month", "year"}
+_DAY_ONLY_RE = re.compile(r"[T ]00:00(?::00(?:\.0+)?)?\s*(?:Z|[+-]00:?00|GMT|UTC|UT)?$", re.IGNORECASE)
 
 
 def date_bounds(text: Optional[str], now: Optional[datetime] = None) -> Optional[tuple[datetime, datetime]]:
@@ -207,8 +208,9 @@ def date_bounds(text: Optional[str], now: Optional[datetime] = None) -> Optional
     dt = parse_absolute(text)
     if dt is None:
         return None
-    if ":" not in text:  # date only: the post could be from any time that day
-        return dt, dt + timedelta(days=1) - timedelta(seconds=1)
+    if ":" not in text or _DAY_ONLY_RE.search(text.strip()):
+        # Date only (or a bare midnight, which is how many indexes write a date): any time that day.
+        return dt, min(dt + timedelta(days=1) - timedelta(seconds=1), now)
     return dt, dt
 
 

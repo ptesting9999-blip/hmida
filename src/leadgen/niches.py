@@ -4,6 +4,7 @@ and writes the search queries the agent then uses to find individual businesses 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict
 from typing import Optional
 
@@ -79,12 +80,33 @@ class NicheResearcher:
             cached = self.store.latest_niches(self.cfg.niches.refresh_days)
             if cached is not None:
                 return [NicheTarget(**n) for n in cached]
-        if self.llm is None or not self.cfg.niches.auto_research:
+        if not self.cfg.niches.auto_research:
             return []
-        niches = self.research()
+        if self.llm is not None and getattr(self.llm, "can_search_web", True):
+            niches = self.research()
+        else:
+            niches = self.from_seeds()  # free mode: no web research, work from your seed niches
         if niches:
             self.store.save_niches([asdict(n) for n in niches])
         return niches
+
+    def from_seeds(self) -> list[NicheTarget]:
+        """Search queries for the seed niches without web research (local model or templates)."""
+        seeds = self.cfg.niches.seed_niches[: self.cfg.niches.max_niches]
+        if self.llm is not None:
+            try:
+                report = self.llm.parse(
+                    NicheReport,
+                    system=RESEARCH_SYSTEM.replace(" Use web search to ground every claim in current evidence.", ""),
+                    user=research_prompt(self.cfg).replace("Research which", "Using your general knowledge, describe which"),
+                    effort=self.cfg.llm.extract_effort,
+                )
+            except LLMTransient as exc:
+                log.warning("local model unavailable for niche queries (%s); using templates", exc)
+                report = None
+            if report is not None and report.niches:
+                return [to_target(s) for s in report.niches[: self.cfg.niches.max_niches]]
+        return [template_niche(seed) for seed in seeds]
 
     def research(self) -> list[NicheTarget]:
         assert self.llm is not None
@@ -112,6 +134,29 @@ class NicheResearcher:
         if report is None:
             return []
         return [to_target(s) for s in report.niches[: self.cfg.niches.max_niches]]
+
+
+_SEED_STOPWORDS = {
+    "newly", "opened", "recently", "launched", "new", "and", "or", "the", "of", "businesses", "business",
+    "local", "small", "other", "owners", "in", "a", "an",
+}
+_OPENING_PHRASES = '("grand opening" OR "now open" OR "just opened" OR "soft opening" OR "just launched")'
+
+
+def _singular(word: str) -> str:
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def template_niche(seed: str) -> NicheTarget:
+    """'newly opened gyms and fitness studios' -> opening-announcement queries for gym/fitness/studio."""
+    words = [_singular(w) for w in re.findall(r"[a-z]+", seed.lower()) if w not in _SEED_STOPWORDS and len(w) > 2]
+    terms = " OR ".join(dict.fromkeys(words[:4])) or seed
+    queries = [f"{_OPENING_PHRASES} ({terms}) {site}" for site in ("site:instagram.com", "site:facebook.com", "site:linkedin.com/posts")]
+    return NicheTarget(name=seed, rationale="seed niche (free mode: no web research)", search_queries=queries)
 
 
 def to_target(s: NicheSuggestion) -> NicheTarget:

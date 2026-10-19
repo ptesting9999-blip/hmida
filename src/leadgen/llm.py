@@ -128,7 +128,7 @@ class LLM:
             log.warning("Claude rejected the request (%s); skipping item", exc.message)
             return None
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 429 or exc.status_code >= 500:
+            if exc.status_code in (408, 409, 429) or exc.status_code >= 500:
                 raise LLMTransient(f"Claude API error {exc.status_code}") from exc
             log.warning("Claude API error %s; skipping item", exc.status_code)
             return None
