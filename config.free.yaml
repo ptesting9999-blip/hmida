@@ -1,0 +1,48 @@
+# 100% free setup: no paid API anywhere. Used by docker-compose.free.yml:
+#   docker compose -f docker-compose.free.yml up -d
+# The brain is a local AI model (Ollama), web search is your own SearXNG, and mailboxes are
+# checked directly over SMTP. That needs a machine where outbound port 25 is open; see README.
+# Edit the agency block and the two CHANGE lines, then start it.
+
+agency:
+  name: Your Agency
+  services:
+    - social media management (content, posting, community)
+    - paid ads management (Meta, Instagram, TikTok, Google)
+  ideal_client: small and mid-sized local businesses, e-commerce brands and startups
+  target_locations: []          # e.g. [United States, Canada]; empty = anywhere
+
+window:
+  min_age_days: 2
+  max_age_days: 14
+
+sources:
+  search:
+    provider: searxng
+    searxng_url: http://searxng:8080   # the SearXNG container; http://localhost:8888 outside Docker
+    results_per_query: 20
+  reddit:
+    enabled: true
+
+niches:
+  auto_research: true           # free mode: queries are written from your seed niches
+  max_niches: 4
+  seed_niches:
+    - newly opened gyms and fitness studios
+    - new restaurants, cafes and bakeries
+    - newly opened med spas and salons
+
+llm:
+  provider: ollama              # or: none (built-in rules, no AI, nothing to download)
+  ollama_url: http://ollama:11434   # http://localhost:11434 outside Docker
+  ollama_model: qwen2.5:7b      # ~5 GB download, needs ~8 GB RAM; qwen2.5:3b for smaller machines
+
+verification:
+  smtp: true                    # free, but needs outbound port 25
+  smtp_from: verify@yourdomain.com   # CHANGE: an address on a domain you own
+  helo_host: mail.yourdomain.com     # CHANGE: hostname that resolves to this machine's IP
+  provider: auto                # adds ZeroBounce automatically if ZEROBOUNCE_API_KEY is set (100 free/month)
+  dns: auto                     # falls back to DNS-over-HTTPS when the local resolver fails
+
+enrichment:
+  use_hunter: never
