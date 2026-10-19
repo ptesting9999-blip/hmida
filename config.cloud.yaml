@@ -45,5 +45,6 @@ verification:
 
 enrichment:
   use_hunter: never
+  max_email_candidates: 3     # each guess costs a ZeroBounce credit (100 free a month)
 
 workers: 2
