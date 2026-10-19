@@ -53,6 +53,8 @@ open(path, "w").write(head + sep + tail)
 EOF
 
 # -- SearXNG container --------------------------------------------------------------------
+# Settings may have changed since the container started: always start a fresh one.
+docker rm -f "$NAME" >/dev/null 2>&1 || true
 if ! curl -sf --noproxy '*' "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
   log "starting SearXNG on 127.0.0.1:$PORT"
   image=searxng/searxng:latest
@@ -61,8 +63,16 @@ if ! curl -sf --noproxy '*' "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; th
     docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image" >/dev/null
   }
   docker rm -f "$NAME" >/dev/null 2>&1 || true
+  ca_env=()
+  if [ -f "$WORK/proxy-ca.crt" ]; then
+    # SearXNG's HTTP client takes its trusted CAs from SSL_CERT_FILE, not outgoing.verify;
+    # without this every engine fails with CertificateVerifyError behind the proxy.
+    ca_env=(-e SSL_CERT_FILE=/etc/searxng/proxy-ca.crt -e REQUESTS_CA_BUNDLE=/etc/searxng/proxy-ca.crt
+            -e CURL_CA_BUNDLE=/etc/searxng/proxy-ca.crt)
+  fi
   docker run -d --name "$NAME" --network host \
     -v "$PWD/$WORK:/etc/searxng" \
+    "${ca_env[@]}" \
     -e GRANIAN_HOST=127.0.0.1 -e GRANIAN_PORT=$PORT \
     -e SEARXNG_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
     "$image" >/dev/null
