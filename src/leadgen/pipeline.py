@@ -73,7 +73,7 @@ class RunReport:
             f"Collected {self.collected} posts ({self.already_seen} already processed in earlier runs)",
             f"Outside the date window or undated: {self.out_of_window}",
             f"Dropped by keyword prefilter: {self.prefiltered}",
-            f"Assessed by Claude: {self.classified}; qualified as warm: {self.qualified}",
+            f"Assessed for buying intent: {self.classified}; qualified as warm: {self.qualified}",
             f"Verified leads saved: {len(self.leads)}",
         ]
         if by_stage:
@@ -162,7 +162,7 @@ class LeadAgent:
             log.exception("niche research failed; continuing with explicit-intent queries only")
 
         candidates = self._screen(self._collect(window, report.niches), window, report, limit)
-        log.info("%d posts to assess with Claude", len(candidates))
+        log.info("%d posts to assess for buying intent", len(candidates))
 
         deferred: list[PostOutcome] = []
         pool = ThreadPoolExecutor(max_workers=self.cfg.workers)
@@ -280,7 +280,7 @@ class LeadAgent:
         a = self.classifier.assess(post)
         if a is None:
             # Transient failure: leave the post unseen so the next run retries it.
-            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "error", "Claude could not assess the post"))
+            return PostOutcome(post, rejection=Rejection(post.url, post.platform, "error", "the post could not be assessed"))
         reason = self.classifier.accept(a)
         if reason:
             return PostOutcome(post, rejection=Rejection(post.url, post.platform, "intent", reason, a.business_name or ""), assessment=a)

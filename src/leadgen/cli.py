@@ -51,7 +51,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         except LLMUnavailable as exc:
             # Stay up and try again next cycle: exiting would make Docker restart us in a tight
             # loop. The preflight check fails before any paid search runs, so this costs nothing.
-            log.error("Claude unavailable (%s) - fix ANTHROPIC_API_KEY; retrying next cycle", exc)
+            log.error("AI model unavailable (%s); retrying next cycle", exc)
         except Exception:
             # Network blips etc. must not stop an unattended agent; try again next cycle.
             log.exception("run failed; retrying at the next scheduled run")

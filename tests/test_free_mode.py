@@ -341,3 +341,11 @@ def test_cloud_and_free_configs_load():
     free = load_config(root / "config.free.yaml")
     assert free.llm.provider == "ollama" and free.sources.search.provider == "searxng"
     assert (free.window.min_age_days, free.window.max_age_days) == (2, 14)
+
+
+def test_rules_owner_phrases():
+    def owner(text):
+        return assess_without_ai(post("Looking for a social media manager for " + text), Config()).poster_is_decision_maker
+
+    assert owner("my new pilates studio") and owner("my gym") and owner("my own business")
+    assert not owner("my friend's gym") and not owner("my favorite coffee shop") and not owner("my sister's new salon")

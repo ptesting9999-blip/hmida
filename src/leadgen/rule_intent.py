@@ -43,10 +43,15 @@ _GROWTH_RE = re.compile(
 )
 _URGENT_RE = re.compile(r"\basap\b|urgent|immediately|right away|this week|start (now|asap|immediately)|as soon as", re.I)
 _BUDGET_RE = re.compile(r"[$£€]\s?\d|budget|per month|/mo\b|retainer|paid (role|gig|position)|\brate\b", re.I)
+# "my friend's gym", "my favorite cafe": someone else's business.
+_NOT_MINE = (
+    r"(?:friend|sister|brother|mom|mum|dad|mother|father|wife|husband|partner|client|boss|cousin|aunt|uncle|son|"
+    r"daughter|neighbou?r|favou?rite|local|old|former)(?:'?s)?\s"
+)
 _OWNER_RE = re.compile(
     r"\b(?:i'?m|i am|as)\s+(?:the\s+)?(co-?founder|founder|owner|co-?owner|ceo|managing director)\b|"
-    r"\bmy\s+(?:own\s+)?(?:new\s+)?(gym|studio|business|shop|store|company|startup|brand|salon|spa|restaurant|cafe|clinic|"
-    r"practice|bakery|boutique|agency|firm)\b",
+    r"\bmy\s+(?:(?!" + _NOT_MINE + r")[a-z'-]+\s+){0,2}?(gym|studio|business|shop|store|company|startup|brand|salon|spa|"
+    r"restaurant|cafe|clinic|practice|bakery|boutique|agency|firm)\b",  # "my new pilates studio", not "my friend's gym"
     re.I,
 )
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
