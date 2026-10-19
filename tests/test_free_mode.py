@@ -289,6 +289,7 @@ def free_doctor(tmp_path, routes, mx="ok", **cfg_over):
     cfg.llm.provider = cfg_over.get("llm", "none")
     cfg.sources.search.searxng_url = cfg_over.get("searxng_url")
     cfg.verification.smtp = cfg_over.get("smtp", True)
+    routes = {"https://www.reddit.com/r/forhire/new.json": FakeResp(200, {"data": {}}), **routes}
     return Doctor(cfg, Secrets(**cfg_over.get("secrets", {})), session=FakeSession(routes),
                   mx_lookup=lambda d: MxResult(mx, ["gmail-smtp-in.l.google.com"] if mx == "ok" else [], "no DNS"),
                   connect=lambda h, p, t: b"220 ok", resolve_host=lambda h: True)
@@ -466,3 +467,14 @@ def test_cloud_script_keeps_settings_after_the_outgoing_block(tmp_path):
     subprocess.run(["python3", "-c", snippet, str(f)], check=True)
     out = f.read_text()
     assert "engines:\n  - name: google" in out and out.count("outgoing:") == 1 and "request_timeout" not in out
+
+
+def test_doctor_is_not_ready_when_no_source_can_collect_posts(tmp_path):
+    dead = {"http://s/search": FakeResp(200, {"results": [], "unresponsive_engines": [["brave", "HTTP connection error"]]}),
+            "https://www.reddit.com/r/forhire/new.json": FakeResp(403)}
+    c = by_name(free_doctor(tmp_path, dead, searxng_url="http://s").run())
+    assert c["Reddit"].status == "fail" and "HTTP 403" in c["Reddit"].detail
+    assert c["Post sources"].status == "fail"
+    d = free_doctor(tmp_path, dead, searxng_url="http://s")
+    d.cfg.sources.imports = ["posts.csv"]
+    assert by_name(d.run())["Post sources"].status == "ok"

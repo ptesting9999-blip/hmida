@@ -127,7 +127,14 @@ def test_broken_dns_and_placeholder_smtp_identity(tmp_path):
     assert c["DNS resolver"].status == "fail"
     assert c["SMTP sender"].status == "warn"
     assert c["Post search"].status == "warn"  # Claude web search fallback
-    assert c["Reddit"].status == "warn"
+    assert c["Reddit"].status == "fail" and "anonymous" in c["Reddit"].detail  # no route: Reddit unreachable
+    assert c["Post sources"].status == "fail"  # neither search nor Reddit can collect anything
+
+
+def test_anonymous_reddit_that_answers_is_a_working_source(tmp_path):
+    routes = {"https://www.reddit.com/r/forhire/new.json": FakeResp(200, {"data": {"children": []}})}
+    c = by_name(make(tmp_path, routes, Secrets()).run())
+    assert c["Reddit"].status == "ok" and c["Post sources"].status == "ok" and "Reddit" in c["Post sources"].detail
 
 
 def test_missing_anthropic_credentials(tmp_path, monkeypatch):

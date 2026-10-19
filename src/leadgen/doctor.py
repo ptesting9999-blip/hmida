@@ -82,11 +82,29 @@ class Doctor:
         self.resolve_host = resolve_host or _resolves
 
     def run(self) -> list[Check]:
-        checks = [self.brain(), self.search(), self.reddit(), self.hunter()]
+        search, reddit = self.search(), self.reddit()
+        checks = [self.brain(), search, reddit, self.sources(search, reddit), self.hunter()]
         checks += self.verification()
         checks.append(self.output_dir())
         checks.append(self.cost())
         return checks
+
+    def sources(self, search: Check, reddit: Check) -> Check:
+        """'Ready to run' is wrong when no source can bring in a single post."""
+        src = self.cfg.sources
+        working = []
+        if src.search.enabled and search.status == "ok":
+            working.append("web search")
+        if src.reddit.enabled and reddit.status == "ok" and reddit.detail != "disabled in config":
+            working.append("Reddit")
+        if src.rss:
+            working.append("RSS feeds")
+        if src.imports:
+            working.append("imports")
+        if working:
+            return Check("Post sources", "ok", "collecting from " + ", ".join(working))
+        return Check("Post sources", "fail", "no source can collect posts right now: the run would find nothing",
+                     "fix web search or Reddit (see above), or add RSS feeds / import files")
 
     def _get(self, url: str, **kw: Any) -> Any:
         resp = self.session.get(url, timeout=15, **kw)
@@ -195,10 +213,14 @@ class Doctor:
             return Check(name, "ok", "disabled in config")
         s = self.secrets
         if not (s.reddit_client_id and s.reddit_client_secret):
-            return Check(
-                name, "warn", "no app credentials: slow anonymous access, which Reddit often blocks from servers",
-                "create a free 'script' app at https://www.reddit.com/prefs/apps and set REDDIT_CLIENT_ID / _SECRET",
-            )
+            fix = "create a free 'script' app at https://www.reddit.com/prefs/apps and set REDDIT_CLIENT_ID / _SECRET"
+            try:
+                resp = self.session.get("https://www.reddit.com/r/forhire/new.json", params={"limit": 1}, timeout=15)
+                resp.raise_for_status()
+                resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                return Check(name, "fail", f"Reddit refuses anonymous requests from this machine ({_http_error(exc)})", fix)
+            return Check(name, "ok", "anonymous access works (slow; app credentials are faster and more reliable)")
         try:
             resp = self.session.post(
                 "https://www.reddit.com/api/v1/access_token",
