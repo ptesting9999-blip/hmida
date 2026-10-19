@@ -152,7 +152,8 @@ def test_ollama_preflight():
 def test_template_niche_queries():
     t = template_niche("newly opened gyms and fitness studios")
     assert len(t.search_queries) == 3
-    assert all('"grand opening"' in q and "(gym OR fitness OR studio)" in q for q in t.search_queries)
+    assert all('"grand opening"' in q and "(gyms OR fitness OR studios)" in q for q in t.search_queries)
+    assert "(pilates OR classes)" in template_niche("new pilates classes").search_queries[0]  # not "pilate"/"classe"
     assert any("site:instagram.com" in q for q in t.search_queries)
 
 
@@ -349,3 +350,119 @@ def test_rules_owner_phrases():
 
     assert owner("my new pilates studio") and owner("my gym") and owner("my own business")
     assert not owner("my friend's gym") and not owner("my favorite coffee shop") and not owner("my sister's new salon")
+
+
+# -- second review: rule-mode false positives / negatives ---------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "We're a new med spa in Austin. We offer botox and facials. Looking for a social media manager.",
+    "Our clinic offers a free consultation. We need someone to run our Instagram ads.",
+    "I'm a realtor and need a social media manager to keep my clients engaged.",
+    "We're a marketing team at a SaaS startup looking for a paid ads specialist.",
+    "I work as a nurse and need a social media manager for my side business.",
+])
+def test_buyers_using_seller_words_are_still_buyers(text):
+    a = assess_without_ai(post(text), Config())
+    assert a.intent_type == "explicit_request" and not a.author_is_service_provider
+
+
+@pytest.mark.parametrize("text", [
+    "Looking for work as a social media manager, 3 years experience.",
+    "Is anyone hiring a social media manager? I really need a job.",
+    "Seeking a remote social media manager position.",
+    "I help businesses get more customers with Facebook ads. Looking for new clients!",
+])
+def test_job_seekers_and_sellers_are_not_leads(text):
+    a = assess_without_ai(post(text), Config())
+    assert a.author_is_service_provider and IntentClassifier(Config(), None).accept(a)
+
+
+@pytest.mark.parametrize("text, growth", [
+    ("Our gym raised prices again", False),
+    ("Netflix series about yoga studios", False),
+    ("First day of my new diet", False),
+    ("We raised $2M seed round for our app", True),
+    ("Grand opening this weekend!", True),
+])
+def test_growth_signals_need_real_openings_or_funding(text, growth):
+    assert (assess_without_ai(post(text, niche="gyms"), Config()).intent_type == "growth_signal") is growth
+
+
+@pytest.mark.parametrize("text, site", [
+    ("email jane.doe@brewco.com", None),
+    ("built on Next.js", None),
+    ("attached resume.pdf", None),
+    ("We just opened.Need help", None),
+    ("see acme.co.uk/about", "acme.co.uk"),
+    ("visit glowspa.studio today", "glowspa.studio"),
+    ("our site: acme.com.", "acme.com"),
+])
+def test_website_extraction(text, site):
+    from leadgen.rule_intent import _website
+
+    assert _website(text) == site
+
+
+def test_business_names_are_not_platforms_days_or_people():
+    def biz(text, title="", author=None):
+        p = post(text, author=author)
+        p.title = title
+        return assess_without_ai(p, Config())
+
+    assert biz("We need help with reels", title="Social media manager needed at Glow Spa").business_name == "Glow Spa"
+    assert biz("I run Facebook ads for fun. Need SMM").business_name is None
+    assert biz("We opened Monday and need a social media manager").business_name is None
+    doctor = biz("Need SMM help", author="Dr. Jane Smith")
+    assert doctor.business_name is None and doctor.poster_name == "Jane Smith"
+    assert biz("Need SMM help", author="Sarah").business_name is None
+
+
+def test_niche_words_match_whole_words():
+    from leadgen.rule_intent import _niche
+
+    blank = RawPost("t", "x", "u")
+    assert _niche("a coworking space", blank) is None and _niche("happy to pay", blank) is None
+    assert _niche("our new med spa", blank) == "beauty" and _niche("chiropractor", blank) == "healthcare"
+
+
+@pytest.mark.parametrize("text", ["11." * 7000, "a" * 20000 + "@", "need " + "x." * 10000])
+def test_pathological_text_is_fast(text):
+    import time
+
+    start = time.monotonic()
+    assess_without_ai(post(text), Config())
+    assert time.monotonic() - start < 0.5
+
+
+def test_auto_dns_without_nameservers_falls_back_instead_of_crashing(monkeypatch):
+    import dns.resolver
+
+    def no_config(*a, **k):
+        raise dns.resolver.NoResolverConfiguration("no nameservers")
+
+    monkeypatch.setattr(dns.resolver, "Resolver", no_config)
+    doh = DohSession({"Status": 0, "Answer": [{"type": 15, "data": "10 mx.remote."}]})
+    assert MxLookup("auto", session=doh)("acme.com").hosts == ["mx.remote"]
+    assert MxLookup("system")("acme.com").status == "error"
+
+
+def test_doctor_rejects_claude_search_without_claude(tmp_path):
+    d = free_doctor(tmp_path, {})
+    d.cfg.sources.search.provider = "claude"
+    assert d.search().status == "fail"
+
+
+def test_cloud_script_keeps_settings_after_the_outgoing_block(tmp_path):
+    import re
+    import subprocess
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent.parent / "scripts" / "run_in_cloud.sh").read_text()
+    snippet = re.search(r"python3 - \"\$WORK/settings.yml\" <<'EOF'\n(.*?)\nEOF", script, re.S).group(1)
+    f = tmp_path / "settings.yml"
+    f.write_text("use_default_settings: true\noutgoing:\n  request_timeout: 6.0\n\n  max_request_timeout: 15.0\n"
+                 "engines:\n  - name: google\n\n# added by scripts/run_in_cloud.sh\noutgoing:\n  proxies: {}\n")
+    subprocess.run(["python3", "-c", snippet, str(f)], check=True)
+    out = f.read_text()
+    assert "engines:\n  - name: google" in out and out.count("outgoing:") == 1 and "request_timeout" not in out

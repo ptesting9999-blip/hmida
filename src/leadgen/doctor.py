@@ -164,6 +164,9 @@ class Doctor:
             return self.searxng(url.rstrip("/"))
         if choice == "searxng":
             return Check(name, "fail", "provider searxng selected but no URL set", "set sources.search.searxng_url")
+        if choice == "claude" and self.cfg.llm.provider != "claude":
+            return Check(name, "fail", "provider claude selected, but the brain is not Claude",
+                         "set llm.provider: claude, or use sources.search.provider: searxng")
         if self.cfg.llm.provider == "claude":
             return Check(
                 name, "warn", "no Brave/Serper key: Claude's web search tool will be used (works, but costs more per run)",

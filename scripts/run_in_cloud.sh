@@ -41,15 +41,14 @@ cp searxng/settings.yml "$WORK/settings.yml"
 } >>"$WORK/settings.yml"
 # The appended outgoing block replaces the one copied from searxng/settings.yml.
 python3 - "$WORK/settings.yml" <<'EOF'
+import re
 import sys
 path = sys.argv[1]
 text = open(path).read()
 head, sep, tail = text.partition("# added by scripts/run_in_cloud.sh")
 if "outgoing:" in tail:
-    start = head.find("\noutgoing:")
-    if start != -1:
-        end = head.find("\n\n", start + 1)
-        head = head[:start] + (head[end:] if end != -1 else "\n")
+    # the block's own lines are indented (or blank); the next top-level key ends it
+    head = re.sub(r"(?m)^outgoing:.*\n(?:[ \t]+.*\n|[ \t]*\n)*", "", head)
 open(path, "w").write(head + sep + tail)
 EOF
 

@@ -143,17 +143,10 @@ _SEED_STOPWORDS = {
 _OPENING_PHRASES = '("grand opening" OR "now open" OR "just opened" OR "soft opening" OR "just launched")'
 
 
-def _singular(word: str) -> str:
-    if word.endswith("ies"):
-        return word[:-3] + "y"
-    if word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
-    return word
-
-
 def template_niche(seed: str) -> NicheTarget:
-    """'newly opened gyms and fitness studios' -> opening-announcement queries for gym/fitness/studio."""
-    words = [_singular(w) for w in re.findall(r"[a-z]+", seed.lower()) if w not in _SEED_STOPWORDS and len(w) > 2]
+    """'newly opened gyms and fitness studios' -> opening-announcement queries for gyms/fitness/studios.
+    Words are kept as written: search engines match singular and plural forms themselves."""
+    words = [w for w in re.findall(r"[a-z]+", seed.lower()) if w not in _SEED_STOPWORDS and len(w) > 2]
     terms = " OR ".join(dict.fromkeys(words[:4])) or seed
     queries = [f"{_OPENING_PHRASES} ({terms}) {site}" for site in ("site:instagram.com", "site:facebook.com", "site:linkedin.com/posts")]
     return NicheTarget(name=seed, rationale="seed niche (free mode: no web research)", search_queries=queries)

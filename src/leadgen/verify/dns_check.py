@@ -20,9 +20,9 @@ class MxResult:
 
 
 def lookup_mx(domain: str, timeout: float = 8.0, resolver: Optional[dns.resolver.Resolver] = None) -> MxResult:
-    resolver = resolver or dns.resolver.Resolver()
     try:
-        answer = resolver.resolve(domain, "MX", lifetime=timeout)
+        # Building a resolver fails on machines with no nameservers configured (NoResolverConfiguration).
+        answer = (resolver or dns.resolver.Resolver()).resolve(domain, "MX", lifetime=timeout)
     except dns.resolver.NXDOMAIN:
         return MxResult("nxdomain", detail="domain does not exist")
     except dns.resolver.NoAnswer:
