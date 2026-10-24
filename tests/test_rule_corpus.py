@@ -270,3 +270,13 @@ def test_guessed_handle_domain_is_kept_only_if_the_site_names_the_business():
     wrong = ContactFinder(Config(), crawler=Crawler("This domain is for sale"), llm=None, hunter=None, lookup_backend=None)
     plan = wrong.plan(ctx)
     assert plan.domain is None and not plan.decision_makers
+
+
+def test_posts_opening_with_marketing_hashtags_are_marketers():
+    assert not accepted("Looking for a digital marketing agency? Struggling with reach?", platform="linkedin",
+                        url="https://www.linkedin.com/posts/someone_metaads-facebookads-digitalmarketing-activity-1")
+    assert not accepted("Looking for a Social Media Agency to drive Instagram growth", platform="linkedin",
+                        title="#socialmedia #contentcreation #digitalmarketing | Zed Ali",
+                        url="https://www.linkedin.com/posts/zedali_socialmedia-contentcreation-activity-2")
+    assert accepted("We're looking for an experienced freelance social media manager for our roastery", platform="linkedin",
+                    url="https://www.linkedin.com/posts/downeastroast_were-looking-for-an-experienced-freelance-activity-3")

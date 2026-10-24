@@ -185,6 +185,18 @@ environment's settings (never paste keys into chat or commit them):
   the number of niches modest, and run every 6 hours rather than every hour.
 * Niche research is not live: the agent works from your `seed_niches` instead of researching new
   ones each week. Update them yourself now and then.
+* Finding the owner is the hard part. Most matching posts are by individuals on LinkedIn or X whose
+  snippet does not name their business, and those sites cannot be crawled, so no owner email can be
+  worked out. In a test run, 60 posts gave 22 real buyers and openings but one identifiable owner.
+  Reddit app credentials (free) and websites in posts raise that; Claude raises it most.
+* Verification credits are only spent on businesses where an owner was identified, and
+  `verification.max_checks_per_business` (2 in `config.cloud.yaml`) caps the credits one business
+  can use. An address that cannot be confirmed is dropped, never delivered.
+
+How the rules were checked: 258 real search results were labelled by independent reviewers
+(buyer / genuine opening / not a lead). On those, the rules keep 46 of the 48 real leads and let
+through 10 that are not (precision 0.82, recall 0.96). `tests/test_rule_corpus.py` holds the post
+shapes that were wrong before, paraphrased.
 
 ## Read this before relying on it
 

@@ -424,6 +424,23 @@ def _request(text: str) -> Optional[str]:
     return found
 
 
+_MKT_TAG = re.compile(
+    r"#(?:digital|social|content|performance|growth|influencer|email|seo|ppc|sem|meta|facebook|instagram|google|tiktok|"
+    r"linkedin|youtube)?(?:marketing|media|ads|agency|marketer|creation|strategy|manager|management|advertising|branding)\w*\b|"
+    r"#(?:metaads|facebookads|googleads|tiktokads|seo|ppc|smm|digitalmarketingagency|marketingagency)\b",
+    re.I,
+)
+
+
+def _marketer_tags(post: RawPost) -> bool:
+    """Posts that open with marketing hashtags ('#metaads #facebookads #digitalmarketing') are marketers'
+    own posts. LinkedIn puts those first hashtags in the URL slug."""
+    m = re.search(r"linkedin\.com/posts/[^_/?]+_([^/?]+?)-activity", post.url)
+    slug_tags = " ".join("#" + w for w in m.group(1).split("-")[:4]) if m else ""
+    head = f"{(post.title or '')[:80]} {slug_tags}"
+    return len(_MKT_TAG.findall(head)) >= 2
+
+
 def _headline(post: RawPost) -> str:
     """Title plus the opening of the text, where a content post shows itself ("5 signs...", "How to hire...")."""
     body = re.sub(r"^\s*(?:\w{3} \d{1,2}, \d{4}|\d+ (?:hours?|days?|weeks?) ago)\s*(?:\.\.\.|·)?\s*", "", post.text or "")
@@ -654,7 +671,8 @@ def assess_without_ai(post: RawPost, cfg: Config) -> IntentAssessment:
     business_poster = business_poster or any(not _person(n) and _looks_like_business(n) for n in names[1:])
     url = post.url.lower()
     job_board = any(b in url for b in _JOB_BOARDS) or bool(_JOB_BOARD_TITLE.search(post.title or ""))
-    seller = _seller(text) or job_board or any(_is_provider_name(n) for n in names) or not _english(text)
+    seller = _seller(text) or job_board or any(_is_provider_name(n) for n in names) or not _english(text) \
+        or _marketer_tags(post)
     job_seeker = _job_seeker(text)
     content = bool(_CONTENT_RE.search(_headline(post)))
     request = None if (job_seeker or content) else _request(text)
