@@ -497,6 +497,19 @@ def _person(author: str) -> Optional[str]:
     return " ".join(words)
 
 
+_COMPOUND_BIZ = ("coffee", "cafe", "bakery", "bakeshop", "fitness", "studio", "salon", "spa", "gym", "kitchen", "shop",
+                 "store", "clinic", "dental", "boutique", "pilates", "yoga", "barber", "beauty", "wellness", "realty", "homes",
+                 "group", "labs", "brewing", "roasters", "pizza", "grill", "bistro", "eatery", "academy")
+
+
+def _looks_like_business(name: str) -> bool:
+    """'Glow Studio', 'GlowStudio' and the joined-up handle 'downeastcoffee' all name a business."""
+    if _BUSINESS_WORDS.search(re.sub(r"([a-z])([A-Z])", r"\1 \2", name)):
+        return True
+    token = name.strip().lower()
+    return " " not in token and len(token) >= 6 and any(w in token for w in _COMPOUND_BIZ)
+
+
 def _owner(text: str) -> tuple[bool, Optional[str]]:
     for pattern in _OWNER_RES:
         m = pattern.search(text)
@@ -531,8 +544,34 @@ def _growth(text: str, business_poster: bool) -> bool:
     return False
 
 
+_EN_WORDS = frozenset("the and to of a in for is our we you with on at this are be it my i an your looking need hiring".split())
+# Function words of the other languages that show up in these searches (Nordic, Spanish, German, French, Dutch, Portuguese).
+_FOREIGN_WORDS = frozenset(
+    """og af på ikke vores hos jeg eller mit fra vil nye blev efter vi har det er til som var
+    el los las una para con por que del nuestro nuestra está estamos y
+    und der die das nicht mit wir unser unsere ist für auf ein eine
+    le la les des une pour avec nous notre est dans sur et
+    het een niet wij onze voor van
+    os uma não nós nosso nossa com""".split()
+)
+
+
+def _english(text: str) -> bool:
+    """The rules only understand English: 'I går var det grand opening hos ...' is not judged.
+    Snippets full of hashtags and abbreviations still count as English."""
+    words = re.findall(r"[^\W\d_']+", text.lower())
+    foreign = sum(w in _FOREIGN_WORDS for w in words)
+    return foreign < 3 or foreign <= sum(w in _EN_WORDS for w in words)
+
+
+# "Jive is hiring a social media manager", "hiring a social media manager for Luckin Coffee"
+_HIRING_FOR_RE = re.compile(
+    rf"\b(?i:hiring|looking for|seeking)\b[^.\n]{{0,50}}?\b(?i:at|for)[ \t]+((?:{_UPPER}[\w&'’]*)(?:[ \t]+(?:{_UPPER}[\w&'’]*|&)){{0,3}})"
+)
+
+
 def _business_name(text: str) -> Optional[str]:
-    for m in _BUSINESS_RE.finditer(text):
+    for m in [*_BUSINESS_RE.finditer(text), *_HIRER_RE.finditer(text), *_HIRING_FOR_RE.finditer(text)]:
         words = m.group(1).split()
         while words and words[0].lower().strip("'") in _NOT_A_NAME:
             words.pop(0)
@@ -541,6 +580,8 @@ def _business_name(text: str) -> Optional[str]:
         if not words or all(w.lower().strip("'") in _NOT_A_NAME for w in words):
             continue
         if len(words) == 1 and _SERVICE_RE.fullmatch(words[0]):
+            continue
+        if words[0] in ("We", "I", "They", "He", "She", "It", "Who", "Everyone", "Anyone", "Someone"):
             continue
         return " ".join(words)
     return None
@@ -607,14 +648,13 @@ def assess_without_ai(post: RawPost, cfg: Config) -> IntentAssessment:
     text = _quotes(post.content())
     author = _quotes(post.author or "").strip()
     person = _person(author)
-    business_poster = bool(author) and not person and not author.startswith("u/") and bool(_BUSINESS_WORDS.search(author))
+    business_poster = bool(author) and not person and not author.startswith("u/") and _looks_like_business(author)
 
     names = _poster_names(post)
-    business_poster = business_poster or any(not _person(n) and _BUSINESS_WORDS.search(re.sub(r"([a-z])([A-Z])", r"\1 \2", n))
-                                             for n in names[1:])
+    business_poster = business_poster or any(not _person(n) and _looks_like_business(n) for n in names[1:])
     url = post.url.lower()
     job_board = any(b in url for b in _JOB_BOARDS) or bool(_JOB_BOARD_TITLE.search(post.title or ""))
-    seller = _seller(text) or job_board or any(_is_provider_name(n) for n in names)
+    seller = _seller(text) or job_board or any(_is_provider_name(n) for n in names) or not _english(text)
     job_seeker = _job_seeker(text)
     content = bool(_CONTENT_RE.search(_headline(post)))
     request = None if (job_seeker or content) else _request(text)
@@ -625,6 +665,8 @@ def assess_without_ai(post: RawPost, cfg: Config) -> IntentAssessment:
         or _business_name(text)
         or (author if business_poster else None)
     )
+    if business and _is_provider_name(business):
+        seller = True  # "We're hiring a social media manager at RMD Advertising": an agency hiring staff
     website = post.extra.get("website") or _website(text, business)
     location = _location(text, post.url, website)
 

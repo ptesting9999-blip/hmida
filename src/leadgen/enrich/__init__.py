@@ -62,6 +62,12 @@ def _name_key(name: Optional[str]) -> str:
     return " ".join((name or "").lower().split())
 
 
+def _site_names(site: SiteProfile, business: str) -> bool:
+    """Does the site's text name the business? (letters only: "Down East Coffee" ~ "downeastcoffee")"""
+    want = _letters(business)
+    return len(want) >= 4 and any(want in _letters(page.text[:5000]) for page in site.pages[:3])
+
+
 def _owns_email(email: str, ctx: BusinessContext) -> bool:
     """Is this post address the poster's own (jane@, jane.doe@) or the business's own (glowstudio@gmail.com)?"""
     local = _letters(email.split("@", 1)[0])
@@ -112,9 +118,15 @@ class ContactFinder:
         domain = self._domain(ctx, notes)
 
         site: Optional[SiteProfile] = None
+        guessed = bool(notes) and notes[-1].startswith("trying ")
+        if guessed and (self.crawler is None or not self.cfg.enrichment.crawl_website):
+            domain = None  # an unchecked guess is never used
         if domain and self.crawler is not None and self.cfg.enrichment.crawl_website:
             site = self.crawler.crawl(domain)
-            if not site.reachable:
+            if guessed and not (site.reachable and _site_names(site, ctx.business_name or "")):
+                notes.append(f"{domain} is not {ctx.business_name}'s site")
+                domain, site = None, None
+            elif not site.reachable:
                 notes.append(f"website {domain} unreachable")
             elif site.final_domain and site.final_domain != domain:
                 final = site.final_domain
@@ -181,6 +193,13 @@ class ContactFinder:
             domain = resolve_domain(ctx.business_name, ctx.location, self.lookup_backend)
             if domain:
                 notes.append(f"website found by search: {domain}")
+        if domain is None and ctx.business_name and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{3,40}", ctx.business_name):
+            # A company page's handle ("downeastcoffee") is often its domain; plan() keeps the guess only
+            # if that site names the business.
+            guess = normalize_domain(f"{ctx.business_name.lower()}.com")
+            if guess:
+                notes.append(f"trying {guess} (company handle)")
+                return guess
         if domain is None:
             notes.append("no business website found")
         return domain

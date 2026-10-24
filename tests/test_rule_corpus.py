@@ -227,3 +227,46 @@ def test_one_business_never_costs_more_than_its_budget(tmp_path):
     assert not leads and len(provider.checked) == 3  # 9 guesses across 3 people, 3 credits
     assert "budget" in rejection.reason
     assert NOW  # keep the fixture import used
+
+
+# -- business names, languages, guessed websites -------------------------------------------------
+
+
+def _assess(text, author=None, niche=None, url="https://www.linkedin.com/posts/x"):
+    return assess_without_ai(RawPost("t", "linkedin", url, text=text, author=author, niche=niche), Config())
+
+
+def test_business_names_from_hiring_phrases():
+    assert _assess("Jive is hiring a social media manager! If you love content, apply.").business_name == "Jive"
+    assert _assess("I'm hiring a social media manager for Luckin Coffee").business_name == "Luckin Coffee"
+    agency = _assess("We're hiring a social media manager at RMD Advertising")
+    assert agency.author_is_service_provider  # an agency hiring staff for its clients
+    assert _assess("Looking for a freelance social media manager for our roastery", author="Downeastcoffee").business_name == "Downeastcoffee"
+
+
+def test_posts_in_other_languages_are_not_judged():
+    assert not accepted("I går var det grand opening hos Kitch'n på Bryne! Før: 4 000 ordre", niche="cafes")
+    assert not accepted("Grand Opening af vores nye hovedkontor på Marmormolen", niche="cafes")
+    assert accepted("HIRING: Meta Ads Expert Freelance | Remote | 2-5 yrs FB & Insta Ads, Pixel, CAPI, GA4")
+
+
+def test_guessed_handle_domain_is_kept_only_if_the_site_names_the_business():
+    from leadgen.enrich import ContactFinder
+    from leadgen.enrich.website import SitePage, SiteProfile
+
+    class Crawler:
+        def __init__(self, text):
+            self.text, self.crawled = text, []
+
+        def crawl(self, domain):
+            self.crawled.append(domain)
+            return SiteProfile(domain=domain, base_url=f"https://{domain}/", pages=[SitePage("u", self.text)],
+                               people=[Person("Mara Quinn", "Owner", source="jsonld")])
+
+    ctx = BusinessContext("Downeastcoffee", None, None, None, False)
+    right = ContactFinder(Config(), crawler=Crawler("Down East Coffee roasters. Mara Quinn, Owner"), llm=None, hunter=None, lookup_backend=None)
+    plan = right.plan(ctx)
+    assert plan.domain == "downeastcoffee.com" and plan.decision_makers
+    wrong = ContactFinder(Config(), crawler=Crawler("This domain is for sale"), llm=None, hunter=None, lookup_backend=None)
+    plan = wrong.plan(ctx)
+    assert plan.domain is None and not plan.decision_makers
