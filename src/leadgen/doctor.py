@@ -224,7 +224,8 @@ class Doctor:
                 resp.raise_for_status()
                 resp.json()
             except (requests.RequestException, ValueError) as exc:
-                return Check(name, "fail", f"Reddit refuses anonymous requests from this machine ({_http_error(exc)})", fix)
+                # A warning: other sources may still work ("Post sources" fails when none does).
+                return Check(name, "warn", f"Reddit refuses anonymous requests from this machine ({_http_error(exc)})", fix)
             return Check(name, "ok", "anonymous access works (slow; app credentials are faster and more reliable)")
         try:
             resp = self.session.post(

@@ -127,7 +127,7 @@ def test_broken_dns_and_placeholder_smtp_identity(tmp_path):
     assert c["DNS resolver"].status == "fail"
     assert c["SMTP sender"].status == "warn"
     assert c["Post search"].status == "warn"  # Claude web search fallback
-    assert c["Reddit"].status == "fail" and "anonymous" in c["Reddit"].detail  # no route: Reddit unreachable
+    assert c["Reddit"].status == "warn" and "anonymous" in c["Reddit"].detail  # no route: Reddit unreachable
     assert c["Post sources"].status == "fail"  # neither search nor Reddit can collect anything
 
 

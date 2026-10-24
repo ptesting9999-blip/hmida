@@ -475,7 +475,7 @@ def test_doctor_is_not_ready_when_no_source_can_collect_posts(tmp_path):
     dead = {"http://s/search": FakeResp(200, {"results": [], "unresponsive_engines": [["brave", "HTTP connection error"]]}),
             "https://www.reddit.com/r/forhire/new.json": FakeResp(403)}
     c = by_name(free_doctor(tmp_path, dead, searxng_url="http://s").run())
-    assert c["Reddit"].status == "fail" and "HTTP 403" in c["Reddit"].detail
+    assert c["Reddit"].status == "warn" and "HTTP 403" in c["Reddit"].detail
     assert c["Post sources"].status == "fail"
     d = free_doctor(tmp_path, dead, searxng_url="http://s")
     d.cfg.sources.imports = ["posts.csv"]
