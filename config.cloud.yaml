@@ -1,0 +1,51 @@
+# Free setup for machines WITHOUT port 25 or working DNS, such as a Claude Code cloud session.
+# Used by scripts/run_in_cloud.sh. Nothing here costs money:
+#   - brain: built-in rules (no AI model to download)
+#   - search: SearXNG started locally by the script
+#   - verification: ZeroBounce's free plan (100 checks a month). Set ZEROBOUNCE_API_KEY as an
+#     environment variable; without it no address can be verified here, so no lead is saved.
+# The session's network access must allow the open internet (search engines, Reddit, websites).
+
+agency:
+  name: Your Agency
+  services:
+    - social media management (content, posting, community)
+    - paid ads management (Meta, Instagram, TikTok, Google)
+  ideal_client: small and mid-sized local businesses, e-commerce brands and startups
+  target_locations: []
+
+window:
+  min_age_days: 2
+  max_age_days: 14
+
+sources:
+  search:
+    provider: searxng
+    searxng_url: http://127.0.0.1:8888
+    results_per_query: 20
+  reddit:
+    enabled: true
+
+niches:
+  auto_research: true
+  max_niches: 3
+  seed_niches:
+    - newly opened gyms and fitness studios
+    - new restaurants, cafes and bakeries
+    - newly opened med spas and salons
+
+llm:
+  provider: none
+
+verification:
+  smtp: false                   # port 25 is blocked in cloud sessions
+  provider: zerobounce
+  dns: doh                      # no local DNS here
+  max_inactive_days: 365
+  max_checks_per_business: 2    # each check costs a ZeroBounce credit; raise it when you have more
+
+enrichment:
+  use_hunter: never
+  max_email_candidates: 3     # guesses per person; verification.max_checks_per_business caps the credits
+
+workers: 2

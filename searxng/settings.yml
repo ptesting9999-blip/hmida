@@ -1,0 +1,31 @@
+# SearXNG settings for the lead agent's free web search.
+# Docs: https://docs.searxng.org/admin/settings/index.html
+use_default_settings: true
+
+server:
+  # Overridden by the SEARXNG_SECRET environment variable; set one in .env.
+  secret_key: "set-SEARXNG_SECRET-in-env"
+  limiter: false          # the agent is the only client; no bot protection needed
+  image_proxy: false
+
+search:
+  safe_search: 0
+  formats: [html, json]   # json is what the agent reads
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 15.0
+
+# Turn on the big web engines (several are off by default). Any that a network blocks just
+# time out after outgoing.request_timeout; the rest still answer.
+engines:
+  - name: bing
+    disabled: false
+  - name: google
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: startpage
+    disabled: false
