@@ -384,7 +384,9 @@ def test_job_seekers_and_sellers_are_not_leads(text):
     ("Netflix series about yoga studios", False),
     ("First day of my new diet", False),
     ("We raised $2M seed round for our app", True),
-    ("Grand opening this weekend!", True),
+    ("Our grand opening is this weekend!", True),
+    ("The grand opening of Market West Fitness marks another milestone for the district", False),  # a third party
+    ("Nominations are now open for the 2027 awards! Our gym is proud to sponsor", False),
 ])
 def test_growth_signals_need_real_openings_or_funding(text, growth):
     assert (assess_without_ai(post(text, niche="gyms"), Config()).intent_type == "growth_signal") is growth

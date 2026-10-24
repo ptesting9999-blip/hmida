@@ -82,13 +82,15 @@ class EmailVerifier:
         return self.verify_many([email])[email.strip().lower()]
 
     def verify_many(
-        self, emails: list[str], stop_at_first: bool = False, use_cache: bool = True
+        self, emails: list[str], stop_at_first: bool = False, use_cache: bool = True, max_checks: Optional[int] = None
     ) -> dict[str, VerificationResult]:
         """Verify addresses in the given (priority) order.
 
         With stop_at_first, checking stops at the first deliverable address so paid API credits
         are not spent on lower-priority guesses; skipped addresses come back as "unknown".
-        All candidates on one domain still share a single SMTP session.
+        All candidates on one domain still share a single SMTP session. With max_checks, at most that
+        many addresses get a fresh check (policy rejections and cached answers are free); the rest come
+        back "unknown". Each fresh result has checked_now=True so callers can track a budget.
         """
         order: list[str] = []
         for raw in emails:
@@ -110,14 +112,20 @@ class EmailVerifier:
             pending_by_domain[rules.split_email(email)[1]].append(email)
 
         probes: dict[str, tuple[MxResult, Optional[SmtpProbe]]] = {}
+        fresh = 0
         for email in order:
             if email not in results:
+                if max_checks is not None and fresh >= max_checks:
+                    results[email] = _result(email, "unknown", "not checked: verification budget for this business used up", {})
+                    continue
+                fresh += 1
                 domain = rules.split_email(email)[1]
                 if domain not in probes:
                     with self._lock_for(domain):
                         probes[domain] = self._probe_domain(domain, pending_by_domain[domain])
                 mx, probe = probes[domain]
                 results[email] = self._decide(email, mx, probe)
+                results[email].checked_now = True
                 if self.store and results[email].status != "unknown":
                     self.store.save_verification(results[email])
             if stop_at_first and results[email].deliverable:

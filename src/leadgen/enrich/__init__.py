@@ -62,6 +62,22 @@ def _name_key(name: Optional[str]) -> str:
     return " ".join((name or "").lower().split())
 
 
+def _owns_email(email: str, ctx: BusinessContext) -> bool:
+    """Is this post address the poster's own (jane@, jane.doe@) or the business's own (glowstudio@gmail.com)?"""
+    local = _letters(email.split("@", 1)[0])
+    if ctx.poster is not None:
+        parts = ctx.poster.name_parts
+        if parts and email_matches_name(email, parts[0], parts[-1] if len(parts) > 1 else None):
+            return True
+    if ctx.business_name:
+        biz = _letters(ctx.business_name)
+        if len(biz) >= 4 and (local == biz or (len(local) >= 4 and (local in biz or biz in local))):
+            return True
+        if name_matches(ctx.business_name, split_email(email)[1]) and ctx.poster is None:
+            return True
+    return False
+
+
 def _letters(text: str) -> str:
     return re.sub(r"[^a-z]", "", text.lower())
 
@@ -148,12 +164,19 @@ class ContactFinder:
 
     def _domain(self, ctx: BusinessContext, notes: list[str]) -> Optional[str]:
         domain = normalize_domain(ctx.website)
-        if domain is None:
-            for email in ctx.emails_in_post:
-                d = split_email(email)[1]
-                if d and not is_free_provider(d) and normalize_domain(d):
-                    domain = d
-                    break
+        # A post email shows the business's mail domain only if it is the poster's or the business's own
+        # address; "my old agency was mike@sparkmedia.com" names another company.
+        owned = []
+        for email in ctx.emails_in_post:
+            d = split_email(email)[1]
+            if d and not is_free_provider(d) and normalize_domain(d) and _owns_email(email, ctx):
+                owned.append(d)
+        if domain and owned and domain not in owned and ctx.business_name and not name_matches(ctx.business_name, domain) \
+                and name_matches(ctx.business_name, owned[0]):
+            notes.append(f"{domain} does not look like {ctx.business_name}'s site; using {owned[0]} from the post")
+            domain = owned[0]
+        if domain is None and owned:
+            domain = owned[0]
         if domain is None and ctx.business_name and self.lookup_backend is not None:
             domain = resolve_domain(ctx.business_name, ctx.location, self.lookup_backend)
             if domain:
@@ -268,7 +291,8 @@ class ContactFinder:
         is_poster = ctx.poster is not None and _name_key(ctx.poster.name) == _name_key(person.name)
         if is_poster:
             for email in ctx.emails_in_post:
-                add(email, "post", 100 + weight)
+                if _owns_email(email, ctx):  # not "contact my assistant amy@..." or a competitor's address
+                    add(email, "post", 100 + weight)
         add(person.email, person.source or "website", 90 + weight)
         first_ascii = ascii_name(first)
         for email in site_emails:

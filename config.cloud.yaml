@@ -42,9 +42,10 @@ verification:
   provider: zerobounce
   dns: doh                      # no local DNS here
   max_inactive_days: 365
+  max_checks_per_business: 2    # each check costs a ZeroBounce credit; raise it when you have more
 
 enrichment:
   use_hunter: never
-  max_email_candidates: 3     # each guess costs a ZeroBounce credit (100 free a month)
+  max_email_candidates: 3     # guesses per person; verification.max_checks_per_business caps the credits
 
 workers: 2

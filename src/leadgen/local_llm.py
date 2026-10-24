@@ -58,7 +58,10 @@ class OllamaLLM:
             raise LLMUnavailable(f"Ollama is not reachable at {self.base_url} ({exc.__class__.__name__}); start it first") from exc
         wanted = self.model if ":" in self.model else f"{self.model}:latest"
         if wanted not in names and self.model not in names:
-            raise LLMUnavailable(f"Ollama model {self.model} is not installed: run `ollama pull {self.model}`")
+            raise LLMUnavailable(
+                f"Ollama model {self.model} is not installed: run `ollama pull {self.model}` "
+                f"(with docker-compose.free.yml: set OLLAMA_MODEL={self.model} in .env)"
+            )
 
     def parse(self, schema: type[T], *, system: str, user: str, effort: str = "low", max_tokens: int = 8000) -> Optional[T]:
         body = {

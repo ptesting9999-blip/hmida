@@ -36,6 +36,8 @@ llm:
   provider: ollama              # or: none (built-in rules, no AI, nothing to download)
   ollama_url: http://ollama:11434   # http://localhost:11434 outside Docker
   ollama_model: qwen2.5:7b      # ~5 GB download, needs ~8 GB RAM; qwen2.5:3b for smaller machines
+                                # changing it? also set OLLAMA_MODEL=<same name> in .env, which is
+                                # the model docker-compose.free.yml downloads
 
 verification:
   smtp: true                    # free, but needs outbound port 25

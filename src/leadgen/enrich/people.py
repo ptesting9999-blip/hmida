@@ -61,9 +61,17 @@ _TITLE_ALT = (
     r"(?:Co-?Founder|Founder|Co-?Owner|Owner|CEO|Chief Executive Officer|Managing Director|President|"
     r"Proprietor|Head of Marketing|Marketing Director|CMO)"
 )
-_NAME = r"[A-Z][a-z'’\-]+(?: [A-Z][a-z'’\-]+){1,2}"
-_NAME_THEN_TITLE = re.compile(rf"(?P<name>{_NAME})\s*(?:,|-|–|—|\||\(|:)\s*(?:the |our )?(?P<title>(?:{_TITLE_ALT})(?:\s*(?:&|and|/)\s*{_TITLE_ALT})?)")
-_TITLE_THEN_NAME = re.compile(rf"(?P<title>{_TITLE_ALT})(?:\s*(?:&|and|/)\s*{_TITLE_ALT})?\s*(?:,|:|-|–|—)?\s+(?P<name>{_NAME})")
+# Names are capitalised (any script); titles match in any case ("our founder", "Founder & CEO").
+_NAME = r"[A-ZÀ-ÖØ-ÞĀ-Ž][a-zß-öø-ÿā-ž'’\-]+(?: [A-ZÀ-ÖØ-ÞĀ-Ž][a-zß-öø-ÿā-ž'’\-]+){1,2}"
+_TITLE_I = rf"(?i:{_TITLE_ALT})"
+_NAME_THEN_TITLE = re.compile(
+    rf"(?P<name>{_NAME})\s*(?:,|-|–|—|\||\(|:)\s*(?i:the |our |is our |is the )?(?P<title>{_TITLE_I}(?:\s*(?:&|and|/)\s*{_TITLE_I})?)"
+)
+_TITLE_THEN_NAME = re.compile(
+    rf"(?P<title>{_TITLE_I})(?:\s*(?:&|and|/)\s*{_TITLE_I})?\s*(?:,|:|-|–|—)?\s+(?P<name>{_NAME})"
+)
+# "Glow Pilates was founded in 2021 by Sarah Lee", "founded by Sarah Lee and Tom Park"
+_FOUNDED_BY = re.compile(rf"(?i:(?:co-?)?founded)(?:\s+(?i:in)\s+\d{{4}})?\s+(?i:by)\s+(?P<name>{_NAME})")
 _NOT_NAMES = {"Our Team", "Meet The", "About Us", "Contact Us", "The Team", "Read More", "Learn More"}
 
 
@@ -73,9 +81,16 @@ def regex_people(text: str) -> list[Person]:
     for rx in (_NAME_THEN_TITLE, _TITLE_THEN_NAME):
         for m in rx.finditer(text):
             name = m.group("name").strip()
-            if name in _NOT_NAMES or name.split()[0] in ("Our", "The", "Meet", "About"):
+            words = name.split()
+            while words and words[0] in ("Our", "The", "Meet", "About", "Say", "Hello", "Hi"):
+                words.pop(0)  # "Meet Sarah Lee, our founder" -> Sarah Lee
+            name = " ".join(words)
+            if len(words) < 2 or name in _NOT_NAMES:
                 continue
             people.setdefault(name.lower(), Person(name=name, role=m.group("title"), source="website", evidence=m.group(0)))
+    for m in _FOUNDED_BY.finditer(text):
+        name = m.group("name").strip()
+        people.setdefault(name.lower(), Person(name=name, role="Founder", source="website", evidence=m.group(0)))
     return list(people.values())
 
 

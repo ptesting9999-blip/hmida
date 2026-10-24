@@ -17,15 +17,21 @@ log = logging.getLogger(__name__)
 SERVICE_TERMS = re.compile(
     r"social\s*media|\bsmm\b|instagram|tik\s*tok|facebook|\bmeta\b|google ads|\bppc\b|paid ads|"
     r"ads? manager|ad campaigns?|advertis|marketing agency|digital marketing|content creat|\bugc\b|"
-    r"linkedin ads|youtube ads|media buyer|growth marketer",
+    r"linkedin ads|youtube ads|media buyer|growth marketer|\bsocials\b|\big\b|\bfb\b|\binsta\b",
     re.IGNORECASE,
 )
 
 # Unmistakable signs the author is selling these services. Softer phrases that buyers use too
 # ("DM me for details", "free audit") are left for Claude to judge.
+_MKT = r"(?:social media|smm|marketing|ads|advertising|instagram|tiktok|facebook|content|followers|ppc|seo|ugc)"
+# "I help coaches find balance ... and I need a social media manager" is a buyer: the marketing
+# term must come before any request word.
+_NO_ASK = r"(?:(?!\b(?:need|needs|looking|hiring|want|seeking)\b)[^.?!\n]){0,80}?"
 SELLER_PATTERNS = re.compile(
-    r"\[\s*for\s*hire\s*\]|\bhire me\b|\bi'?m available for\b|\b(open for|accepting|taking on) (new )?clients\b|"
-    r"\bi help (businesses|brands|coaches|companies|clinics|gyms)\b|\bcheck out my portfolio\b|"
+    r"\[\s*for\s*hire\s*\]|\bhire me\b|\bi'?m available for\b|"
+    rf"\b(?:open for|accepting|taking on) (?:new )?clients\b{_NO_ASK}\b{_MKT}\b|"
+    rf"\b{_MKT}\b{_NO_ASK}\b(?:open for|accepting|taking on) (?:new )?clients\b|"
+    rf"\bi help (?:businesses|brands|coaches|companies|clinics|gyms)\b{_NO_ASK}\b{_MKT}\b|\bcheck out my portfolio\b|"
     r"\bi will (manage|create|run|grow) your\b|fiverr\.com/",
     re.IGNORECASE,
 )
@@ -35,6 +41,7 @@ def prefilter(post: RawPost) -> Optional[str]:
     """Return a rejection reason, or None if the post deserves a Claude look."""
     # A search assistant's summary (Claude-backed search) counts for this cheap gate only.
     content = " ".join(filter(None, [post.content(), post.extra.get("reported_quote", "")]))
+    content = content.replace("\u2019", "'").replace("\u2018", "'")  # "I’m" is "I'm"
     if len(content) < 25:
         return "too little text to judge"
     if SELLER_PATTERNS.search(content):

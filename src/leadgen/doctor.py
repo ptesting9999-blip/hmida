@@ -7,6 +7,7 @@ except one search query when a Brave / Serper key or a SearXNG instance is confi
 from __future__ import annotations
 
 import socket
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -132,7 +133,11 @@ class Doctor:
         installed = {m.get("name", "") for m in tags.get("models") or []}
         wanted = model if ":" in model else f"{model}:latest"
         if model not in installed and wanted not in installed:
-            return Check(name, "fail", f"model {model} is not installed", f"run: ollama pull {model}")
+            in_compose = urlsplit(url).hostname == "ollama"
+            fix = (f"set OLLAMA_MODEL={model} in .env and restart, or run: "
+                   f"docker compose -f docker-compose.free.yml exec ollama ollama pull {model}") if in_compose \
+                else f"run: ollama pull {model}"
+            return Check(name, "fail", f"model {model} is not installed", fix)
         return Check(name, "ok", f"{model} ready at {url}")
 
     def claude(self) -> Check:

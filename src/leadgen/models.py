@@ -123,6 +123,8 @@ class VerificationResult:
     # True when no answer came back because of OUR side (DNS down, port 25 unreachable, verifier
     # API failing): the address was not judged, so the post should be tried again on a later run.
     transient: bool = False
+    # Set by EmailVerifier.verify_many when this answer cost a fresh check (not policy or cache).
+    checked_now: bool = False
 
     @property
     def deliverable(self) -> bool:

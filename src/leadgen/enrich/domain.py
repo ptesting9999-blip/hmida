@@ -23,6 +23,14 @@ NON_BUSINESS_DOMAINS = frozenset(
     shopify.com wix.com squarespace.com godaddy.com wordpress.com blogspot.com tumblr.com zoominfo.com
     apollo.io rocketreach.co mapquest.com foursquare.com nextdoor.com patch.com prnewswire.com
     businesswire.com globenewswire.com
+    calendly.com acuityscheduling.com setmore.com squareup.com square.site toasttab.com opentable.com resy.com
+    fresha.com glossgenius.com schedulicity.com booker.com zenoti.com doordash.com ubereats.com grubhub.com
+    seamless.com postmates.com deliveroo.co.uk just-eat.co.uk typeform.com jotform.com forms.gle tally.so
+    surveymonkey.com canva.com zoom.us meet.google.com gofundme.com kickstarter.com indiegogo.com patreon.com
+    wellfound.com angel.co eventbrite.co.uk meetup.com tinyurl.com ow.ly t.co buff.ly lnkd.in rebrand.ly
+    cutt.ly linkin.bio campsite.bio stan.store taplink.cc bio.link carrd.co gumroad.com teachable.com
+    mailchimp.com substack.com notion.so notion.site airtable.com docs.google.com drive.google.com dropbox.com
+    workable.com lever.co greenhouse.io jobsoid.com breezy.hr recruitee.com indeed.com glassdoor.com upwork.com
     """.split()
 )
 # Free site-builder subdomains (acme.wixsite.com): no mailboxes on these.

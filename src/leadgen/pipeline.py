@@ -328,13 +328,19 @@ class LeadAgent:
         failures: list[str] = []
         greylisted = transient = False
         max_contacts = self.cfg.enrichment.max_contacts_per_business
+        budget = self.cfg.verification.max_checks_per_business  # shared by every person at this business
         for dm in plan.decision_makers:
             if len(leads) >= max_contacts:
                 break
             if not dm.candidates:
                 failures.append(f"{dm.person.name}: no candidate addresses")
                 continue
-            results = self.verifier.verify_many([c.email for c in dm.candidates], stop_at_first=True)
+            if budget is not None and budget <= 0:
+                failures.append(f"{dm.person.name}: not checked, verification budget for this business used up")
+                break
+            results = self.verifier.verify_many([c.email for c in dm.candidates], stop_at_first=True, max_checks=budget)
+            if budget is not None:
+                budget -= sum(1 for r in results.values() if r.checked_now)
             chosen = next((c for c in dm.candidates if results[c.email].deliverable), None)
             if chosen is None:
                 greylisted = greylisted or any(results[c.email].retryable for c in dm.candidates)

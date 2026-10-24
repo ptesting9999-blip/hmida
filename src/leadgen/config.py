@@ -170,6 +170,9 @@ class VerificationConfig(_Section):
     # Greylisting servers answer "try again later" to first contact. Businesses whose best
     # address got that answer are re-checked once, this many seconds later (0 = never).
     greylist_retry_seconds: int = Field(default=360, ge=0, le=3600)
+    # Most addresses per business sent to the mail servers / verification API (cached answers are
+    # free). Set it when every check costs a credit; None = no limit.
+    max_checks_per_business: Optional[int] = Field(default=None, ge=1)
     extra_disposable_domains_file: Optional[str] = None
 
 
