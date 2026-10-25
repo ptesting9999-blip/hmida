@@ -26,20 +26,52 @@ a glowing, voice-reactive HUD.
 
 ---
 
-## Setup
+## Get it onto your computer first
 
-Requires **Python 3.10+**.
+The code lives on GitHub — clone it to your machine:
 
 ```bash
-cd ultron
+git clone -b claude/vibrant-rubin-smfa2s https://github.com/ptesting9999-blip/hmida.git
+cd hmida/ultron
+```
+
+No `git`? Download the ZIP from the repo (green **Code** button → Download ZIP), unzip it,
+and open the `hmida-.../ultron` folder.
+
+## Easiest way to run it — one click
+
+Requires **Python 3.10+** (install from [python.org](https://python.org); on Windows tick
+*"Add python.exe to PATH"*). Then:
+
+- **Windows:** double-click **`start.bat`** (orb HUD) or **`terminal.bat`** (terminal version).
+- **macOS/Linux:** `./start.sh` (orb HUD) or `./start.sh terminal`.
+
+The first run makes a virtual environment, installs everything, and asks for your Anthropic
+API key once (get one at [console.anthropic.com](https://console.anthropic.com)) — it saves it
+to `apikey.txt` so it won't ask again.
+
+## Run it manually
+
+### Windows (PowerShell)
+
+```powershell
 python -m venv venv
-# Windows:  venv\Scripts\activate      macOS/Linux:  source venv/bin/activate
+venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:ANTHROPIC_API_KEY = "sk-ant-...your key..."
+venv\Scripts\python.exe run.py        # or: venv\Scripts\python.exe cli.py
+```
+
+> PowerShell doesn't use `&&`, `source`, or `export` — run the lines one by one as above.
+> Calling `venv\Scripts\python.exe` directly avoids any `Activate.ps1` execution-policy prompts.
+
+### macOS / Linux
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-
-# Give it your Anthropic API key (get one at console.anthropic.com):
-export ANTHROPIC_API_KEY=sk-ant-...       # Windows: setx ANTHROPIC_API_KEY sk-ant-...
-
-python run.py
+export ANTHROPIC_API_KEY=sk-ant-...
+python run.py        # or: python cli.py
 ```
 
 It opens `http://127.0.0.1:8787` in your browser. **Use Chrome or Edge** for voice input.
