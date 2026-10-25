@@ -268,15 +268,37 @@ for(let i=0;i<12;i++){const lon=Math.random()*Math.PI*2,len=0.3+Math.random()*0.
 // spiral core
 for(let s=0;s<8;s++){const turns=3+Math.random()*2,segs=300,g=new THREE.BufferGeometry(),p=[];
   for(let i=0;i<=segs;i++){const t=i/segs,a=t*Math.PI*2*turns+s/8*Math.PI*2,ph=t*Math.PI;const r=Math.sin(ph)*R3;p.push(Math.cos(a)*r,Math.cos(ph)*R3,Math.sin(a)*r);}
-  g.setAttribute('position',new THREE.Float32BufferAttribute(p,3));coreG.add(new THREE.Line(g,mat(C_BRIGHT,0.3+Math.random()*0.2)));}
-for(let i=-6;i<=6;i++){const lat=i/6*(Math.PI/2)*0.95,r=Math.cos(lat)*R3,y=Math.sin(lat)*R3;const rr=ring(r,80,mat(C_DIM,0.2));rr.position.y=y;coreG.add(rr);}
-for(let j=0;j<12;j++){const mer=arc(R3,-Math.PI/2,Math.PI/2,80,mat(C_DIM,0.15),'xy');mer.rotation.y=j/12*Math.PI*2;coreG.add(mer);}
+  g.setAttribute('position',new THREE.Float32BufferAttribute(p,3));coreG.add(new THREE.Line(g,mat(C_BRIGHT,0.13+Math.random()*0.1)));}
+for(let i=-6;i<=6;i++){const lat=i/6*(Math.PI/2)*0.95,r=Math.cos(lat)*R3,y=Math.sin(lat)*R3;const rr=ring(r,80,mat(C_DIM,0.11));rr.position.y=y;coreG.add(rr);}
+for(let j=0;j<12;j++){const mer=arc(R3,-Math.PI/2,Math.PI/2,80,mat(C_DIM,0.09),'xy');mer.rotation.y=j/12*Math.PI*2;coreG.add(mer);}
 // innermost
-const ico=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.25,1)),new THREE.LineBasicMaterial({color:C_HOT,transparent:true,opacity:0.95}));inner.add(ico);
-// a second, larger wireframe cage around the core for depth
-const icoCage=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.42,0)),new THREE.LineBasicMaterial({color:C_BRIGHT,transparent:true,opacity:0.45}));inner.add(icoCage);
-const coreSphere=new THREE.Mesh(new THREE.SphereGeometry(0.13,20,20),new THREE.MeshBasicMaterial({color:C_HOT,transparent:true,opacity:0.14,blending:THREE.AdditiveBlending}));inner.add(coreSphere);
-const glow=new THREE.Mesh(new THREE.SphereGeometry(0.45,16,16),new THREE.MeshBasicMaterial({color:C_MID,transparent:true,opacity:0.028,blending:THREE.AdditiveBlending}));inner.add(glow);
+// a wireframe containment cage around the brain, and a faint glow for bloom
+const icoCage=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.74,0)),new THREE.LineBasicMaterial({color:C_BRIGHT,transparent:true,opacity:0.4}));inner.add(icoCage);
+const glow=new THREE.Mesh(new THREE.SphereGeometry(0.6,16,16),new THREE.MeshBasicMaterial({color:C_MID,transparent:true,opacity:0.035,blending:THREE.AdditiveBlending}));inner.add(glow);
+
+// ---- the brain / nucleus at the heart of the orb ----
+function dotTex(){const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d');
+  const g=x.createRadialGradient(32,32,0,32,32,32);g.addColorStop(0,'rgba(255,248,228,1)');g.addColorStop(0.4,'rgba(255,170,48,0.75)');g.addColorStop(1,'rgba(255,170,48,0)');
+  x.fillStyle=g;x.fillRect(0,0,64,64);return new THREE.CanvasTexture(c);}
+const brain=new THREE.Group();scene.add(brain);
+const neurons=[];const RB={x:0.44,y:0.42,z:0.58};
+for(const sign of [1,-1]){for(let i=0;i<170;i++){           // two lobes
+  const u=Math.random()*2-1,a=Math.random()*Math.PI*2,s=Math.sqrt(1-u*u);
+  let x=s*Math.cos(a),y=u,z=s*Math.sin(a);
+  x=sign*(Math.abs(x)*0.9+0.09);                            // split with a central fissure
+  const wr=1+0.10*Math.sin(y*16+z*9)+0.06*Math.sin(x*20);  // gyri-like wrinkle
+  neurons.push(new THREE.Vector3(x*RB.x*wr,y*RB.y*wr,z*RB.z*wr));
+}}
+const npos=new Float32Array(neurons.length*3);neurons.forEach((v,i)=>{npos[i*3]=v.x;npos[i*3+1]=v.y;npos[i*3+2]=v.z;});
+const ngeo=new THREE.BufferGeometry();ngeo.setAttribute('position',new THREE.BufferAttribute(npos,3));
+const nmat=new THREE.PointsMaterial({map:dotTex(),color:C_HOT,size:0.075,transparent:true,opacity:0.98,sizeAttenuation:true,blending:THREE.AdditiveBlending,depthWrite:false});
+brain.add(new THREE.Points(ngeo,nmat));
+// synapses: connect each neuron to its nearest few
+const seg=[];for(let i=0;i<neurons.length;i++){const near=[];for(let j=0;j<neurons.length;j++)if(j!==i){const d=neurons[i].distanceTo(neurons[j]);if(d<0.22)near.push([d,j]);}
+  near.sort((a,b)=>a[0]-b[0]);for(let k=0;k<Math.min(2,near.length);k++){const j=near[k][1];if(j>i)seg.push(neurons[i],neurons[j]);}}
+const smat=new THREE.LineBasicMaterial({color:C_BRIGHT,transparent:true,opacity:0.22,blending:THREE.AdditiveBlending});
+brain.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg),smat));
+const spark=new THREE.Mesh(new THREE.SphereGeometry(0.05,16,16),new THREE.MeshBasicMaterial({color:0xfff2d8,transparent:true,opacity:0.5,blending:THREE.AdditiveBlending}));brain.add(spark);
 
 // code text sprites
 const SNIPPETS=["sys.init()","RSA 4096","impl Orb","0xFFAA30","await scan()","neural.link","v.1.7.3","ULTRON","trace::on","pkt 0x1F","core.sync","fn render()","AES-256","node[42]","loop{}","grid.map","vec3()","shader.ok","mesh#9","bind()","yield","assert","0b1011","ping()","exec","hash::","orbit","daemon","root@","compile","link.rs","async","static","heap++","stackptr","regs","kernel","uplink","decode","0xDEAD"];
@@ -334,8 +356,13 @@ function animate(){
   coreG.rotation.y-=0.005; coreG.rotation.z+=0.002; coreG.rotation.x=Math.cos(0.1*t)*0.08;
   inner.rotation.x+=0.008; inner.rotation.y+=0.012;
   const surge=Math.pow(Math.max(0,Math.sin(0.4*t)),5)*1.5+Math.pow(Math.max(0,Math.sin(0.7*t+2)),8)*2.0;
-  const sc=1+surge*0.3+Math.sin(5*t)*0.05+energy*1.1; coreSphere.scale.setScalar(sc); glow.scale.setScalar(1+surge*0.2+energy*0.8);
-  ico.material.opacity=0.6+Math.pow(Math.max(0,Math.sin(0.25*t)),3)*0.4+energy*0.3;
+  glow.scale.setScalar(1+surge*0.2+energy*0.8);
+  // the brain nucleus: breathes, rotates slowly, and fires harder with energy
+  brain.rotation.y+=0.0016; brain.rotation.x=Math.sin(0.15*t)*0.06;
+  brain.scale.setScalar(1+Math.sin(t*1.2)*0.03+surge*0.08+energy*0.18);
+  nmat.opacity=0.82+0.18*Math.sin(t*3)+energy*0.2;
+  smat.opacity=0.22+0.16*Math.abs(Math.sin(t*1.6))+energy*0.4;
+  spark.scale.setScalar(1+surge*0.5+Math.sin(t*6)*0.2+energy*0.6);
   for(const sp of codeSprites){sp.userData.lon+=sp.userData.sp;const{lat,lon,r}=sp.userData;sp.position.set(Math.cos(lat)*Math.cos(lon)*r,Math.sin(lat)*r,Math.cos(lat)*Math.sin(lon)*r);}
   for(const m of debris){m.userData.a+=m.userData.sp*0.016;const{r,lat,a}=m.userData;m.position.set(Math.cos(lat)*Math.cos(a)*r,Math.sin(lat)*r,Math.cos(lat)*Math.sin(a)*r);m.rotation.x+=0.015;m.rotation.z+=0.01;}
   dust.rotation.y+=0.0002;
