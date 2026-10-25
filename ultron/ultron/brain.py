@@ -55,13 +55,16 @@ class Brain:
         self.system = f"{SYSTEM_PROMPT}\n\n--- What you already know ---\n{self.memory.context_block()}"
         self.messages: list[dict[str, Any]] = []
         self._interrupt = False
+        # If the account rejects an optional feature (server-side fallback,
+        # web search), we drop them and fall back to a plain request.
+        self._stripped = False
 
     def interrupt(self) -> None:
         self._interrupt = True
 
-    def _tool_params(self) -> list[dict[str, Any]]:
+    def _tool_params(self, web: bool = True) -> list[dict[str, Any]]:
         tools = list(self.tools.schemas())
-        if self.use_web:
+        if web:
             tools.append({"type": "web_search_20260209", "name": "web_search"})
         return tools
 
@@ -109,35 +112,48 @@ class Brain:
         return final_text.strip()
 
     async def _stream_once(self):
-        """One streamed call to Claude. Returns (content_blocks, stop_reason, text)."""
-        kwargs: dict[str, Any] = dict(
+        """One streamed call to Claude. Returns (content_blocks, stop_reason, text).
+
+        First tries the full request (server-side refusal fallback + web search).
+        If the account rejects that with a 400, it strips the optional features
+        once and retries with a plain request, so ULTRON keeps working anywhere.
+        """
+        base: dict[str, Any] = dict(
             model=self.model,
             max_tokens=int(self.config.get("max_tokens", 16000)),
             system=self.system,
             messages=self.messages,
-            tools=self._tool_params(),
+            tools=self._tool_params(web=self.use_web and not self._stripped),
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": self.effort},
         )
-        # Server-side refusal fallback keeps ULTRON responsive if a request is declined.
-        betas = ["server-side-fallback-2026-07-01"]
-        kwargs["betas"] = betas
-        kwargs["fallbacks"] = "default"
 
         text_parts: list[str] = []
-        async with self.client.beta.messages.stream(**kwargs) as stream:
-            async for event in stream:
-                if self._interrupt:
-                    break
-                etype = event.type
-                if etype == "content_block_start" and event.content_block.type == "tool_use":
-                    await self.emit({"type": "tool_pending", "name": event.content_block.name})
-                elif etype == "thinking":
-                    await self.emit({"type": "thinking", "text": event.thinking})
-                elif etype == "text":
-                    text_parts.append(event.text)
-                    await self.emit({"type": "token", "text": event.text})
-            final = await stream.get_final_message()
+        try:
+            if self._stripped:
+                stream_cm = self.client.messages.stream(**base)
+            else:
+                stream_cm = self.client.beta.messages.stream(
+                    **base, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+            async with stream_cm as stream:
+                async for event in stream:
+                    if self._interrupt:
+                        break
+                    etype = event.type
+                    if etype == "content_block_start" and event.content_block.type == "tool_use":
+                        await self.emit({"type": "tool_pending", "name": event.content_block.name})
+                    elif etype == "thinking":
+                        await self.emit({"type": "thinking", "text": event.thinking})
+                    elif etype == "text":
+                        text_parts.append(event.text)
+                        await self.emit({"type": "token", "text": event.text})
+                final = await stream.get_final_message()
+        except anthropic.BadRequestError:
+            if not self._stripped:
+                self._stripped = True
+                await self.emit({"type": "error", "text": "adjusting capabilities to your account…"})
+                return await self._stream_once()
+            raise
 
         return list(final.content), final.stop_reason, "".join(text_parts)
 
