@@ -25,6 +25,30 @@
   .scanlines{background:repeating-linear-gradient(to bottom,rgba(255,170,48,.04) 0 1px,transparent 1px 3px);mix-blend-mode:overlay;opacity:.5}
   .grain{opacity:.05;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
 
+  /* rotating HUD reticle that frames the orb */
+  #hudSvg{position:fixed;inset:0;margin:auto;width:min(96vmin,940px);height:min(96vmin,940px);z-index:2;pointer-events:none;
+    filter:drop-shadow(0 0 6px rgba(255,170,48,.25))}
+  #hudSvg .rot{transform-box:view-box;transform-origin:0 0}
+  @keyframes hudspin{to{transform:rotate(360deg)}}
+  .cw80{animation:hudspin 80s linear infinite}
+  .ccw60{animation:hudspin 60s linear infinite reverse}
+  .cw30{animation:hudspin 30s linear infinite}
+  .cw12{animation:hudspin 12s linear infinite}
+
+  /* screen-corner brackets */
+  .bracket{position:fixed;width:44px;height:44px;border:2px solid var(--mid);opacity:.5;z-index:2;pointer-events:none;
+    box-shadow:0 0 12px rgba(221,119,0,.3)}
+  .b-tl{top:13px;left:13px;border-right:none;border-bottom:none}
+  .b-tr{top:13px;right:13px;border-left:none;border-bottom:none}
+  .b-bl{bottom:13px;left:13px;border-right:none;border-top:none}
+  .b-br{bottom:13px;right:13px;border-left:none;border-top:none}
+
+  /* faint telemetry readouts */
+  .tele{position:fixed;z-index:2;pointer-events:none;font-size:9px;letter-spacing:.2em;color:var(--mid);opacity:.55;text-shadow:0 0 8px rgba(221,119,0,.4)}
+  .tele.l{left:66px;top:50%;transform:translateY(-120px)}
+  .tele.r{right:66px;top:50%;transform:translateY(-120px);text-align:right}
+  .tele span{color:var(--bright)}
+
   .hud{position:fixed;z-index:3;letter-spacing:.28em;text-shadow:0 0 14px rgba(255,170,48,.45)}
   .title{top:22px;left:0;right:0;text-align:center;font-size:22px;font-weight:700;
     color:var(--bright);letter-spacing:.55em;pointer-events:none}
@@ -99,6 +123,37 @@
   <div class="overlay scanlines"></div>
   <div class="overlay grain"></div>
 
+  <!-- rotating reticle HUD over the orb -->
+  <svg id="hudSvg" viewBox="-500 -500 1000 1000" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <defs>
+      <radialGradient id="sweep" cx="0" cy="0" r="470" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="#ffaa30" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="#ffaa30" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <circle r="492" fill="none" stroke="#884400" stroke-width="1" opacity="0.3"/>
+    <g id="ticks"></g>
+    <circle class="rot cw80" r="455" fill="none" stroke="#dd7700" stroke-width="1.5" stroke-dasharray="2 12" opacity="0.5"/>
+    <g class="rot ccw60" fill="none" stroke="#dd7700" stroke-width="3" stroke-linecap="round" opacity="0.55">
+      <path d="M 425 0 A 425 425 0 0 1 300 300"/>
+      <path d="M -425 0 A 425 425 0 0 1 -300 -300"/>
+      <path d="M 70 -419 A 425 425 0 0 1 240 -350"/>
+    </g>
+    <g class="rot cw30" fill="#ffaa30" opacity="0.7">
+      <path d="M 0 -402 l -9 -16 l 18 0 z"/>
+      <circle cx="402" cy="0" r="4"/><circle cx="-402" cy="0" r="4"/>
+    </g>
+    <g class="rot cw12"><path d="M0 0 L 470 0 A 470 470 0 0 0 440 -165 Z" fill="url(#sweep)" opacity="0.5"/></g>
+    <g stroke="#dd7700" stroke-width="1.5" opacity="0.45">
+      <line x1="-20" y1="0" x2="-7" y2="0"/><line x1="7" y1="0" x2="20" y2="0"/>
+      <line x1="0" y1="-20" x2="0" y2="-7"/><line x1="0" y1="7" x2="0" y2="20"/>
+    </g>
+  </svg>
+  <div class="bracket b-tl"></div><div class="bracket b-tr"></div>
+  <div class="bracket b-bl"></div><div class="bracket b-br"></div>
+  <div class="tele l">CORE <span id="tCore">STABLE</span><br>PWR <span>98.6%</span><br>SYNC <span>OK</span></div>
+  <div class="tele r">LINK <span>▲</span><br>SECTOR <span>7G</span><br>MODE <span id="tMode">STBY</span></div>
+
   <div class="hud title">U.L.T.R.O.N.</div>
   <div class="hud sub"><span class="st" id="statusText">offline</span></div>
   <div class="hud meta" id="meta"></div>
@@ -165,8 +220,8 @@ const host=document.getElementById('orb');
 let W=host.clientWidth||innerWidth, H=host.clientHeight||innerHeight;
 
 const scene=new THREE.Scene();
-const camera=new THREE.PerspectiveCamera(55, W/H, 0.1, 500);
-const HOME=new THREE.Vector3(0,0.5,5.5); camera.position.copy(HOME);
+const camera=new THREE.PerspectiveCamera(52, W/H, 0.1, 500);
+const HOME=new THREE.Vector3(0,0.4,6.7); camera.position.copy(HOME);
 
 const renderer=new THREE.WebGLRenderer({antialias:true, alpha:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
@@ -176,7 +231,7 @@ host.appendChild(renderer.domElement);
 
 const controls=new OrbitControls(camera, renderer.domElement);
 controls.enableDamping=true; controls.dampingFactor=0.04; controls.zoomSpeed=1.4;
-controls.enablePan=false; controls.minDistance=0.6; controls.maxDistance=40; controls.target.set(0,0.5,0);
+controls.enablePan=false; controls.minDistance=0.6; controls.maxDistance=40; controls.target.set(0,0.4,0);
 
 // ---- helpers ----
 const mat=(color,opacity)=>new THREE.LineBasicMaterial({color,transparent:true,opacity});
@@ -217,9 +272,11 @@ for(let s=0;s<8;s++){const turns=3+Math.random()*2,segs=300,g=new THREE.BufferGe
 for(let i=-6;i<=6;i++){const lat=i/6*(Math.PI/2)*0.95,r=Math.cos(lat)*R3,y=Math.sin(lat)*R3;const rr=ring(r,80,mat(C_DIM,0.2));rr.position.y=y;coreG.add(rr);}
 for(let j=0;j<12;j++){const mer=arc(R3,-Math.PI/2,Math.PI/2,80,mat(C_DIM,0.15),'xy');mer.rotation.y=j/12*Math.PI*2;coreG.add(mer);}
 // innermost
-const ico=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.25,1)),new THREE.LineBasicMaterial({color:C_HOT,transparent:true,opacity:0.9}));inner.add(ico);
-const coreSphere=new THREE.Mesh(new THREE.SphereGeometry(0.15,16,16),new THREE.MeshBasicMaterial({color:C_HOT,transparent:true,opacity:0.15,blending:THREE.AdditiveBlending}));inner.add(coreSphere);
-const glow=new THREE.Mesh(new THREE.SphereGeometry(0.5,16,16),new THREE.MeshBasicMaterial({color:C_MID,transparent:true,opacity:0.04,blending:THREE.AdditiveBlending}));inner.add(glow);
+const ico=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.25,1)),new THREE.LineBasicMaterial({color:C_HOT,transparent:true,opacity:0.95}));inner.add(ico);
+// a second, larger wireframe cage around the core for depth
+const icoCage=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.42,0)),new THREE.LineBasicMaterial({color:C_BRIGHT,transparent:true,opacity:0.45}));inner.add(icoCage);
+const coreSphere=new THREE.Mesh(new THREE.SphereGeometry(0.13,20,20),new THREE.MeshBasicMaterial({color:C_HOT,transparent:true,opacity:0.14,blending:THREE.AdditiveBlending}));inner.add(coreSphere);
+const glow=new THREE.Mesh(new THREE.SphereGeometry(0.45,16,16),new THREE.MeshBasicMaterial({color:C_MID,transparent:true,opacity:0.028,blending:THREE.AdditiveBlending}));inner.add(glow);
 
 // code text sprites
 const SNIPPETS=["sys.init()","RSA 4096","impl Orb","0xFFAA30","await scan()","neural.link","v.1.7.3","ULTRON","trace::on","pkt 0x1F","core.sync","fn render()","AES-256","node[42]","loop{}","grid.map","vec3()","shader.ok","mesh#9","bind()","yield","assert","0b1011","ping()","exec","hash::","orbit","daemon","root@","compile","link.rs","async","static","heap++","stackptr","regs","kernel","uplink","decode","0xDEAD"];
@@ -255,7 +312,7 @@ const scan1=scanRing(R1,0.01), scan2=scanRing(1.4,0.008);
 // post-processing
 const composer=new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene,camera));
-const bloom=new UnrealBloomPass(new THREE.Vector2(W,H),1.8,0.4,0.2);composer.addPass(bloom);
+const bloom=new UnrealBloomPass(new THREE.Vector2(W,H),1.5,0.45,0.28);composer.addPass(bloom);
 const chroma={uniforms:{tDiffuse:{value:null},uTime:{value:0},uIntensity:{value:0.003}},
   vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
   fragmentShader:`uniform sampler2D tDiffuse;uniform float uTime,uIntensity;varying vec2 vUv;
@@ -284,7 +341,8 @@ function animate(){
   dust.rotation.y+=0.0002;
   const s1=Math.abs(Math.sin(0.4*t));scan1.position.y=Math.sin(0.4*t)*R1;scan1.material.opacity=0.2*s1;
   const s2=Math.abs(Math.sin(0.6*t+2));scan2.position.y=Math.sin(0.6*t+2)*R3;scan2.material.opacity=0.15*s2;
-  bloom.strength=1.6+Math.sin(t*0.8)*0.3+energy*0.7;
+  icoCage.rotation.y-=0.004; icoCage.rotation.x+=0.003;
+  bloom.strength=1.35+Math.sin(t*0.8)*0.25+energy*0.7;
   chromaPass.uniforms.uTime.value=t;
   controls.update();
   composer.render();
@@ -310,10 +368,22 @@ window.ULTRON_ORB={
 const $=id=>document.getElementById(id);
 const orb=()=>window.ULTRON_ORB;
 
+// build the reticle tick marks
+(function(){const g=$('ticks');if(!g)return;const NS='http://www.w3.org/2000/svg';
+  for(let i=0;i<72;i++){const a=i/72*Math.PI*2,long=i%6===0,r0=long?462:474,r1=490;
+    const l=document.createElementNS(NS,'line');
+    l.setAttribute('x1',(Math.cos(a)*r0).toFixed(1));l.setAttribute('y1',(Math.sin(a)*r0).toFixed(1));
+    l.setAttribute('x2',(Math.cos(a)*r1).toFixed(1));l.setAttribute('y2',(Math.sin(a)*r1).toFixed(1));
+    l.setAttribute('stroke',long?'#ffaa30':'#884400');l.setAttribute('stroke-width',long?2.4:1.1);
+    l.setAttribute('opacity',long?0.7:0.4);g.appendChild(l);}})();
+
 // ---------- state ----------
 function setMode(m){
   const labels={idle:'standby',listening:'listening',thinking:'thinking',acting:'working',speaking:'speaking'};
   $('statusText').textContent=labels[m]||m;
+  const t={idle:'STBY',listening:'HEAR',thinking:'PROC',acting:'EXEC',speaking:'VOX'};
+  const core={idle:'STABLE',listening:'OPEN',thinking:'SURGE',acting:'ACTIVE',speaking:'STABLE'};
+  const tm=$('tMode'),tc=$('tCore');if(tm)tm.textContent=t[m]||'STBY';if(tc)tc.textContent=core[m]||'STABLE';
   if(orb()) orb().setMode(m);
 }
 
