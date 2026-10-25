@@ -5,7 +5,7 @@ uvicorn[standard]>=0.30
 
 # PC control — install to let ULTRON use the keyboard, mouse, and see the screen.
 # Safe to skip on a headless machine; those tools just report "no desktop".
-pyautogui>=0.9.54 ; platform_system != "Linux" or True
+pyautogui>=0.9.54 ; platform_system != "Linux"
 pillow>=10.0
 psutil>=5.9
 
