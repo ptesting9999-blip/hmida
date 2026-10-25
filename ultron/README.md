@@ -49,6 +49,21 @@ then just talk. You can also type in the box at the bottom.
 > First run with no key? It still launches the HUD so you can look around — it just can't
 > think until the key is set. An `ant auth login` profile works instead of the env var.
 
+### Prefer the terminal?
+
+Run ULTRON as a plain terminal REPL — same brain, tools, memory and skills, no browser:
+
+```bash
+python cli.py                 # type to it; it streams back and runs tools inline
+python cli.py --speak         # also talk back out loud   (pip install pyttsx3)
+python cli.py --listen        # speak to it instead of typing (pip install SpeechRecognition)
+python cli.py --god           # no approval prompts — runs everything
+python cli.py --help          # all options
+```
+
+It shows every tool it runs and, unless `--god`, asks `allow? [y/N]` before anything
+destructive. Type `exit` to quit.
+
 ---
 
 ## Using it
@@ -85,16 +100,18 @@ Copy `config.example.json` to `config.json` and edit:
 
 ```
 ultron/
-├─ run.py              # entry point — starts the server, opens the HUD
+├─ run.py              # entry point for the browser HUD
+├─ cli.py              # entry point for the terminal version
 ├─ config.example.json
 ├─ requirements.txt
 ├─ web/
 │  └─ hud.html         # the glowing, voice-reactive interface (speech in/out lives here)
 ├─ ultron/
-│  ├─ server.py        # FastAPI + WebSocket; one Brain per browser connection
 │  ├─ brain.py         # the Claude Opus 5.5 reasoning + tool-use loop (streaming)
 │  ├─ tools.py         # the hands: shell, python, files, apps, keyboard/mouse, screen
-│  └─ memory.py        # persistent memory + self-taught skills
+│  ├─ memory.py        # persistent memory + self-taught skills
+│  ├─ server.py        # FastAPI + WebSocket; one Brain per browser connection (HUD)
+│  └─ cli.py           # the terminal REPL (same Brain, text in/out + optional voice)
 └─ data/               # created at runtime: memory.json, skills/
 ```
 
